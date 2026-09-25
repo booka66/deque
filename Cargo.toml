@@ -1,0 +1,30 @@
+[package]
+name = "deque"
+version = "0.1.0"
+edition = "2024"
+description = "Slides in any terminal, from a text file"
+license = "MIT"
+repository = "https://github.com/booka66/deque"
+homepage = "https://github.com/booka66/deque"
+readme = "README.md"
+keywords = ["slides", "presentation", "terminal", "tui"]
+categories = ["command-line-utilities"]
+exclude = ["demo/", "lua/", "plugin/"]
+
+[dependencies]
+base64 = "0.23.1"
+crossterm = "0.29.0"
+icy_sixel = "0.7.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+serde_json = "1.0.151"
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+unicode-width = "0.2.2"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

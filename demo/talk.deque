@@ -1,0 +1,326 @@
+#!/usr/bin/env deque
+// A talk about deque, made with deque: every effect it has, each slide showing
+// the line that made it. Run it: deque demo/talk.deque (or ./talk.deque).
+
+---
+fx: assemble
+then: shine sparkle
+
+# DEQUE
+// run deque notes demo/talk.deque in another terminal to see these
+**slides in your terminal**
+
+{muted}enter or → on · b back · q quit{/}
+
+---
+fx: scramble
+
+## why
+# WHY
+> a talk is a text file. {muted}diff it, grep it, commit it.{/}
+> headlines are text. {muted}no pasted ascii art.{/}
+> every effect is one line. {muted}or none.{/}
+
+---
+lines: glide
+
+## a whole slide
+# HOW
+```
+`---`
+`fx: scramble`
+
+`## why`         {muted}the label{/}
+`# WHY`          {muted}the headline{/}
+`there at once`  {muted}a line{/}
+`> on a key`     {muted}a step{/}
+```
+
+---
+draw: 76x14
+
+## how a slide arrives
+step
+box 3,0 6x3 {accent}tr
+text 7,1 old slide
+text 8,1 {muted}leaves{/}
+step
+arrow 4,13 4,14
+box 3,16 12x3 {accent}fx
+text 7,17 headline
+text 8,17 {muted}arrives{/}
+step
+arrow 4,29 4,30
+box 3,32 12x3 {accent}lines
+text 7,33 lines
+text 8,33 {muted}arrive{/}
+step
+arrow 4,45 4,46
+box 3,48 12x3 {accent}reveal
+text 7,49 each step
+text 8,49 {muted}per key{/}
+step
+arrow 4,61 4,62
+box 3,64 12x3 {accent}then
+text 7,65 flourish
+text 8,65 {muted}at the end{/}
+step
+center 11 **all optional · per slide, or for the whole talk**
+
+---
+fx: wipe
+
+## headlines · wipe
+# WIPE
+`fx: wipe`
+
+from the left, a column at a time. {muted}the default.{/}
+
+---
+fx: iris
+
+## headlines · iris
+# IRIS
+`fx: iris`
+
+from the middle out
+
+---
+fx: slide
+
+## headlines · slide
+# SLIDE
+`fx: slide`
+
+in from off the left edge
+
+---
+fx: zip
+
+## headlines · zip
+# ZIP
+`fx: zip`
+
+rows in from both edges, alternating
+
+---
+fx: drop
+
+## headlines · drop
+# DROP
+`fx: drop`
+
+rows fall from the top and stack
+
+---
+fx: fade
+
+## headlines · fade
+# FADE
+`fx: fade`
+
+up out of the background
+
+---
+fx: scramble
+
+## headlines · scramble
+# SCRAMBLE
+`fx: scramble`
+
+noise settling into the letters
+
+---
+fx: assemble
+
+## headlines · assemble
+# ASSEMBLE
+`fx: assemble`
+
+every cell flies in from somewhere
+
+---
+fx: glitch
+
+## headlines · glitch
+# GLITCH
+`fx: glitch`
+
+tears, goes dark, comes back
+
+---
+fx: typewriter
+
+## headlines · typewriter
+# TYPEWRITER
+`fx: typewriter`
+
+typed a column at a time, a cursor riding the edge
+
+---
+fx: random
+
+## headlines · random
+# RANDOM
+`fx: random`
+
+one of them, the same one every time
+
+---
+lines: scramble
+reveal: fade
+
+## lines · lines and reveal
+# LINES
+`lines: scramble`: this one decoded itself
+
+> `reveal: fade`: this step faded in
+> and so did this one
+> {muted}also: type (default), glide, none{/}
+
+---
+lines: count
+then: pulse
+
+## lines · count
+# COUNT
+`lines: count`
+
+**42 minutes** of its time. **0** of mine.
+{muted}$12 Claude · $3 Cursor · 1024 clicks{/}
+
+---
+## code
+# CODE
+```ts
+// a fence with a language is code, in the talk's colors
+export function fee(order: Order): number {
+  return order.total > 100 ? 0 : order.total * 0.1;
+}
+```
+
+---
+## presenting
+# NOTES
+`// a line like this` in a slide is a speaker note
+
+`deque notes talk.deque` on the laptop: notes, what's next, a timer
+its arrows drive the talk on the TV
+
+{muted}o all slides · 12⏎ slide 12 · r replay this one{/}
+// this is a note. if you're reading it, deque notes is running.
+
+---
+then: shine
+
+## flourishes · shine
+# SHINE
+`then: shine`
+
+a glint across the headline
+
+---
+then: pulse
+
+## flourishes · pulse
+# PULSE
+`then: pulse`
+
+brightens and back
+
+---
+then: shake
+
+## flourishes · shake
+# SHAKE
+`then: shake`
+
+jolted side to side
+
+---
+then: rainbow
+
+## flourishes · rainbow
+# RAINBOW
+`then: rainbow`
+
+colors running through it
+
+---
+then: sparkle
+
+## flourishes · sparkle
+# SPARKLE
+`then: sparkle`
+
+glints coming and going around it
+
+---
+tr: dissolve
+
+## transitions · dissolve
+# DISSOLVE
+`tr: dissolve`
+
+the slide before fell away a cell at a time
+
+---
+tr: sweep
+
+## transitions · sweep
+# SWEEP
+`tr: sweep`
+
+a bar crossed the screen and took it
+
+---
+tr: curtain
+
+## transitions · curtain
+# CURTAIN
+`tr: curtain`
+
+bars met in the middle
+
+---
+tr: dissolve
+
+## pictures
+![one](img/one.png) ![two](img/two.png)
+`![label](file)` on one line: side by side · on lines of their own: stacked
+kitty, iTerm2 or sixel where the terminal has it, colored blocks where it doesn't
+
+---
+enter: more talk.deque
+
+## live demos
+# LIVE
+`enter: any command` runs it on enter: a TUI, a shell, a demo
+
+{good}enter shows this talk's source{/}
+
+---
+fx: drop
+then: shake rainbow
+
+## mix them
+# MIX
+```
+`fx: drop`
+`then: shake rainbow`
+```
+
+or for the whole talk, at the top, before the first `---`
+
+---
+fx: drop
+then: confetti shake
+tr: curtain
+
+## that's all
+# TA-DA
+**~/talks/deque**
+
+questions?
+
+---

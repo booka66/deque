@@ -1,0 +1,522 @@
+//! Slides as the deck draws them. Every text slide has one layout, so
+//! nothing jumps between them: the label, the headline, a short rule and the
+//! lines, as one block in the middle.
+
+use crate::fx::{self, Art};
+use crate::images::Pictures;
+use crate::markup::{self, Cell, Line, Style};
+use crate::screen::Screen;
+use crate::talk::{Draw, Item, Slide, Talk};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The slide as it is.
+    Still,
+    /// Arriving, each part drawing itself in turn.
+    Arrive,
+    /// Only the latest step coming in.
+    Step,
+}
+
+/// Slide n's label, numbered from 00: "03 · W H Y".
+pub fn label(s: &Screen, slide: &Slide, n: usize) -> Option<Line> {
+    let t = slide.label.as_ref()?.to_uppercase();
+    let spaced: Vec<String> = t.chars().map(String::from).collect();
+    Some(markup::plain(&format!("{:02} · {}", n, spaced.join(" ")), s.muted()))
+}
+
+/// The screen empty but for the slides' dots along the bottom.
+pub fn clear(s: &mut Screen, talk: &Talk, n: usize) {
+    s.clear();
+    let (acc, mut_) = (s.accent(), s.muted());
+    let mut d = Line::new();
+    for i in 0..talk.slides.len() {
+        let (ch, st) = if i < n { ('●', mut_) } else if i == n { ('●', acc) } else { ('·', mut_) };
+        d.push(Cell { ch, st });
+        d.push(Cell { ch: ' ', st: Style::default() });
+    }
+    let col = (s.w - talk.slides.len() as i32 * 2 + 1) / 2 + 1;
+    s.put(s.h - 1, col, &d);
+}
+
+/// Slide n (0-based) with its first `shown` steps.
+pub fn draw(s: &mut Screen, talk: &Talk, pics: &mut Pictures, n: usize, mode: Mode, shown: usize, hint: bool) {
+    let slide = &talk.slides[n];
+    if !slide.images.is_empty() {
+        pictures(s, talk, pics, n);
+    } else if let Some(d) = &slide.draw {
+        drawn(s, talk, n, d, mode, shown);
+    } else {
+        text(s, talk, n, mode, shown);
+    }
+    // Before the talk starts: how to size it, in the corner, faint.
+    if hint && n == 0 {
+        let st = s.muted();
+        s.put_str(s.h, 2, "+ − size", st);
+    }
+}
+
+/// Where a text slide's parts go: its label's row, its headline's, its
+/// rule's (0 for none) and its first line's.
+fn layout(s: &Screen, slide: &Slide) -> (i32, i32, i32, i32) {
+    let ah = slide.art.len() as i32;
+    let top = ((s.h - 16) / 2).max(1);
+    let (arow, mut rrow, mut brow) = match slide.label {
+        Some(_) => (top + 2, top + ah + 3, top + ah + 5),
+        None => (top + 1, 0, top + ah + 3),
+    };
+    if slide.art.is_empty() {
+        (rrow, brow) = (0, arow);
+    }
+    (top, arow, rrow, brow)
+}
+
+/// Where a drawing's top left goes.
+fn canvas(s: &Screen, d: &Draw) -> (i32, i32) {
+    (((s.h - d.h) / 2).max(1), ((s.w - d.w) / 2 + 1).max(1))
+}
+
+fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
+    let slide = &talk.slides[n];
+    let label = label(s, slide, n);
+    let art = &slide.art;
+    let aw = art.first().map_or(0, |r| r.len() as i32);
+    let (lrow, arow, rrow, brow) = layout(s, slide);
+    let rule = markup::plain("━━━━━━━━", s.accent());
+    let a = Art { rows: art, aw, ax: (s.w - aw) / 2 + 1, arow, label: label.as_ref(), lrow };
+    let seen = |b: &crate::talk::Body| b.step <= shown;
+    if mode == Mode::Step {
+        if let Some((i, b)) = slide.body.iter().enumerate().find(|(_, b)| b.step == shown) {
+            let row = brow + i as i32;
+            s.clear_row(row);
+            fx::line_in(s, &talk.reveal(slide), row, &b.line);
+        }
+        return;
+    }
+    clear(s, talk, n);
+    if mode == Mode::Arrive {
+        if let Some(l) = &label {
+            fx::line_in(s, "type", lrow, l);
+        }
+        if !art.is_empty() {
+            fx::headline(s, &a, &talk.fx(slide), n + 1);
+        }
+        if rrow > 0 {
+            for f in 1..=8 {
+                if s.hurry {
+                    break;
+                }
+                s.center(rrow, &rule[..f]);
+                s.tick(0.015);
+            }
+        }
+        let how = talk.lines(slide);
+        for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| seen(b)) {
+            fx::line_in(s, &how, brow + i as i32, &b.line);
+        }
+        for t in talk.then(slide) {
+            fx::then(s, &a, &t);
+        }
+    }
+    if let Some(l) = &label {
+        s.center(lrow, l);
+    }
+    a.done(s);
+    if rrow > 0 {
+        s.center(rrow, &rule);
+    }
+    for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| seen(b)) {
+        s.center(brow + i as i32, &b.line);
+    }
+}
+
+/// A drawn slide: its drawing centered, its label at the top of it, and its
+/// groups up to the step shown, in order, so a later clear takes away what
+/// an earlier step drew.
+fn drawn(s: &mut Screen, talk: &Talk, n: usize, d: &Draw, mode: Mode, shown: usize) {
+    let (top, left) = canvas(s, d);
+    if mode == Mode::Step {
+        s.anim = true;
+        for (_, it) in &d.groups[shown] {
+            item(s, it, top, left, d.w);
+        }
+        s.anim = false;
+        return;
+    }
+    clear(s, talk, n);
+    if let Some(l) = label(s, &talk.slides[n], n) {
+        s.center(top, &l);
+    }
+    for g in &d.groups[..=shown.min(d.groups.len() - 1)] {
+        for (_, it) in g {
+            item(s, it, top, left, d.w);
+        }
+    }
+}
+
+fn item(s: &mut Screen, it: &Item, top: i32, left: i32, w: i32) {
+    match it {
+        Item::Text(r, c, l) => s.typeput(top + r, left + c, l),
+        Item::Center(r, l) => s.typeput(top + r, left + (w - markup::width(l)) / 2, l),
+        Item::Box(r, c, bw, bh, title) => boxed(s, top + r, left + c, *bw, *bh, title),
+        Item::Path(pts, dotted) => {
+            let pts: Vec<(i32, i32)> = pts.iter().map(|&(r, c)| (top + r, left + c)).collect();
+            path(s, &pts, *dotted)
+        }
+        Item::Clear(a, b) => {
+            for r in *a..=*b {
+                s.clear_row(top + r);
+            }
+        }
+    }
+}
+
+/// A box, its border traced in clockwise from the top left when animating,
+/// then its title typed.
+/// A box's border, clockwise from the top left corner.
+fn border(row: i32, col: i32, w: i32, h: i32) -> Vec<(i32, i32, char)> {
+    let h = h - 1;
+    let mut p: Vec<(i32, i32, char)> = vec![];
+    for j in 0..w {
+        p.push((row, col + j, '─'));
+    }
+    for j in 1..h {
+        p.push((row + j, col + w - 1, '│'));
+    }
+    for j in (0..w).rev() {
+        p.push((row + h, col + j, '─'));
+    }
+    for j in (1..h).rev() {
+        p.push((row + j, col, '│'));
+    }
+    p[0].2 = '╭';
+    p[(w - 1) as usize].2 = '╮';
+    p[(w + h - 1) as usize].2 = '╯';
+    p[(2 * w + h - 2) as usize].2 = '╰';
+    p
+}
+
+fn boxed(s: &mut Screen, row: i32, col: i32, w: i32, h: i32, title: &Line) {
+    let p = border(row, col, w, h);
+    let st = s.muted();
+    let frames = if s.anim { 20 } else { 1 };
+    let mut done = 0;
+    for f in 1..=frames {
+        let k = p.len() - (p.len() as f64 * ((frames - f) as f64 / frames as f64).powi(3)) as usize;
+        for &(r, c, ch) in &p[done..k] {
+            s.put(r, c, &[Cell { ch, st }]);
+        }
+        done = k;
+        if s.anim {
+            s.tick(0.016);
+        }
+    }
+    let mut t: Line = title.iter().map(|c| Cell { ch: c.ch, st: Style { bold: true, ..c.st } }).collect();
+    let pad = (w - 4 - markup::width(&t)).max(0);
+    t.extend(markup::plain(&" ".repeat(pad as usize), Style::default()));
+    s.typeput(row + 1, col + 2, &t);
+}
+
+fn head(d: (i32, i32)) -> char {
+    match d {
+        (0, 1) => '▶',
+        (0, -1) => '◀',
+        (1, 0) => '▼',
+        _ => '▲',
+    }
+}
+
+/// Every cell of an arrow, with the way it goes there, its head last.
+fn arrow(pts: &[(i32, i32)], dotted: bool) -> Vec<(i32, i32, char, (i32, i32))> {
+    let dir = |a: (i32, i32), b: (i32, i32)| ((b.0 - a.0).signum(), (b.1 - a.1).signum());
+    let line = |d: (i32, i32)| match (d.0 != 0, dotted) {
+        (false, false) => '─',
+        (true, false) => '│',
+        (false, true) => '┄',
+        (true, true) => '┊',
+    };
+    let mut cells: Vec<(i32, i32, char, (i32, i32))> = vec![];
+    for (k, w) in pts.windows(2).enumerate() {
+        let d = dir(w[0], w[1]);
+        let mut at = w[0];
+        while at != w[1] {
+            let ch = if at == w[0] && k > 0 {
+                let before = dir(pts[k - 1], w[0]);
+                match (before, d) {
+                    ((0, 1), (1, 0)) | ((-1, 0), (0, -1)) => '╮',
+                    ((0, 1), (-1, 0)) | ((1, 0), (0, -1)) => '╯',
+                    ((0, -1), (1, 0)) | ((-1, 0), (0, 1)) => '╭',
+                    _ => '╰',
+                }
+            } else {
+                line(d)
+            };
+            cells.push((at.0, at.1, ch, d));
+            at = (at.0 + d.0, at.1 + d.1);
+        }
+    }
+    let last = *pts.last().unwrap();
+    let d = cells.last().unwrap().3;
+    cells.push((last.0, last.1, head(d), d));
+    cells
+}
+
+/// An arrow through the points, straight between them: the head travels
+/// along it when animating, most of the way at once, then settling.
+fn path(s: &mut Screen, pts: &[(i32, i32)], dotted: bool) {
+    let cells = arrow(pts, dotted);
+    let st = s.warm();
+    let len = cells.len() - 1;
+    let frames = if s.anim { 18 } else { 1 };
+    let mut done = 0;
+    for f in 1..=frames {
+        let k = len - (len as f64 * ((frames - f) as f64 / frames as f64).powi(3)) as usize;
+        for &(r, c, ch, _) in &cells[done..k] {
+            s.put(r, c, &[Cell { ch, st }]);
+        }
+        let tip = cells[k];
+        let ch = if k == len { tip.2 } else { head(tip.3) };
+        s.put(tip.0, tip.1, &[Cell { ch, st }]);
+        done = k;
+        if s.anim {
+            s.tick(0.016);
+        }
+    }
+}
+
+/// A picture slide: its pictures at one scale, as large as the screen has
+/// room for, stacked or side by side, and the caption under them.
+fn pictures(s: &mut Screen, talk: &Talk, pics: &mut Pictures, n: usize) {
+    let slide = &talk.slides[n];
+    clear(s, talk, n);
+    if let Some(l) = label(s, slide, n) {
+        s.center(2, &l);
+    }
+    let (cw, ch) = pics.cell();
+    let aspect = cw / ch;
+    let dims: Vec<(f64, f64)> = slide.images.iter().map(|i| pics.dims(&i.path)).collect();
+    let k = dims.len() as f64;
+    let gap = 4.0;
+    let (w, h) = (s.w as f64, s.h as f64);
+    let caption = slide.body.len() as f64;
+    let mut row;
+    if slide.side {
+        // Side by side, the widths add up and the tallest counts.
+        let sw: f64 = dims.iter().map(|d| d.0).sum();
+        let sh = dims.iter().map(|d| d.1 * aspect).fold(0.0, f64::max);
+        let sc = ((w - 4.0 - gap * (k - 1.0)) / sw).min((h - 8.0 - caption) / sh);
+        let mut col = ((w - sw * sc - gap * (k - 1.0)) / 2.0) as i32 + 1;
+        row = 5;
+        let mut tallest = 0;
+        let st = s.muted();
+        for (img, d) in slide.images.iter().zip(&dims) {
+            let (cols, rows) = ((d.0 * sc) as i32, ((d.1 * sc * aspect) as i32).max(1));
+            let alt = markup::plain(&img.alt, st);
+            s.put(4, col + (cols - markup::width(&alt)) / 2, &alt);
+            pics.show(s, &img.path, row, col, cols, rows);
+            col += cols + gap as i32;
+            tallest = tallest.max(rows);
+        }
+        row += tallest + 1;
+    } else {
+        // Stacked, the widest counts and the heights add up, a row between each.
+        let sw = dims.iter().map(|d| d.0).fold(0.0, f64::max);
+        let sh: f64 = dims.iter().map(|d| d.1 * aspect).sum();
+        let sc = ((w - 4.0) / sw).min((h - 7.0 - caption - (k - 1.0)) / sh);
+        row = 4;
+        for (img, d) in slide.images.iter().zip(&dims) {
+            let (cols, rows) = ((d.0 * sc) as i32, ((d.1 * sc * aspect) as i32).max(1));
+            pics.show(s, &img.path, row, (s.w - cols) / 2 + 1, cols, rows);
+            row += rows + 1;
+        }
+    }
+    for b in &slide.body {
+        s.center(row, &b.line);
+        row += 1;
+    }
+}
+
+/// Every slide as text, for reading over.
+pub fn print_all(talk: &Talk, color: bool) -> String {
+    let theme = &talk.theme;
+    let mut out = String::new();
+    let paint = |l: &Line| -> String {
+        if !color {
+            return markup::text(l).trim_end().to_string();
+        }
+        let mut o = String::new();
+        let mut st = None;
+        for c in l {
+            if st != Some(c.st) {
+                o.push_str("\x1b[0m");
+                if c.st.bold {
+                    o.push_str("\x1b[1m");
+                }
+                if let Some(f) = c.st.fg {
+                    o.push_str(&format!("\x1b[38;2;{};{};{}m", f.0, f.1, f.2));
+                }
+                st = Some(c.st);
+            }
+            o.push(c.ch);
+        }
+        o.push_str("\x1b[0m");
+        o
+    };
+    let total = talk.slides.len();
+    for (n, s) in talk.slides.iter().enumerate() {
+        let head = format!("── {}/{total}{} ──", n + 1, s.label.as_ref().map(|l| format!(" · {l}")).unwrap_or_default());
+        out += &paint(&markup::plain(&head, Style::fg(theme.muted)));
+        out.push('\n');
+        if !s.images.is_empty() {
+            let names: Vec<String> =
+                s.images.iter().map(|i| i.path.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
+            out += &format!("[{}]\n", names.join(", "));
+        } else if let Some(d) = &s.draw {
+            let words: Vec<String> = d
+                .groups
+                .iter()
+                .flatten()
+                .filter_map(|(_, it)| match it {
+                    Item::Text(_, _, l) | Item::Center(_, l) | Item::Box(.., l) => Some(markup::text(l).trim().to_string()),
+                    _ => None,
+                })
+                .collect();
+            out += &words.join(" · ");
+            out.push('\n');
+        } else if !s.art.is_empty() {
+            for r in &s.art {
+                out += &paint(&markup::plain(&r.iter().collect::<String>(), Style::fg(theme.accent)));
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        for b in &s.body {
+            out += &paint(&b.line);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Every slide in a grid, to pick one from: arrows move, enter goes, esc
+/// or o leaves. The slide on the screen is marked.
+pub fn overview(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    let total = talk.slides.len() as i32;
+    let mut sel = now as i32;
+    loop {
+        let cw = 30.min(s.w - 2).max(8);
+        let cols = ((s.w - 2) / cw).max(1);
+        let rows = (total + cols - 1) / cols;
+        let fit = (s.h - 4).max(1);
+        // Scrolled so the selection shows.
+        let top = ((sel / cols) - fit + 1).max(0).min((rows - fit).max(0));
+        s.clear();
+        let st = s.muted();
+        s.put_str(1, 2, "slides · arrows move · enter goes · esc back", st);
+        for i in 0..total {
+            let (r, c) = (i / cols - top, i % cols);
+            if r < 0 || r >= fit {
+                continue;
+            }
+            let slide = &talk.slides[i as usize];
+            let mark = if i as usize == now { "●" } else { " " };
+            let text = format!("{mark}{:>3} {}", i + 1, slide.title());
+            let text: String = text.chars().take((cw - 2) as usize).collect();
+            let st = if i == sel {
+                Style { fg: Some(s.theme.bg), bg: Some(s.theme.accent), bold: true }
+            } else if i as usize == now {
+                s.accent()
+            } else {
+                Style::default()
+            };
+            s.put_str(3 + r, 2 + c * cw, &text, st);
+        }
+        s.flush();
+        let Ok(ev) = event::read() else { return None };
+        match ev {
+            Event::Key(k) if k.kind != KeyEventKind::Release => match k.code {
+                KeyCode::Esc | KeyCode::Char('o' | 'q') | KeyCode::Tab => return None,
+                KeyCode::Enter | KeyCode::Char(' ') => return Some(sel as usize),
+                KeyCode::Right | KeyCode::Char('l') => sel += 1,
+                KeyCode::Left | KeyCode::Char('h') => sel -= 1,
+                KeyCode::Down | KeyCode::Char('j') => sel += cols,
+                KeyCode::Up | KeyCode::Char('k') => sel -= cols,
+                KeyCode::Home => sel = 0,
+                KeyCode::End => sel = total - 1,
+                _ => {}
+            },
+            Event::Resize(..) => s.size(),
+            _ => {}
+        }
+        sel = sel.clamp(0, total - 1);
+    }
+}
+
+/// What the talk's line `src` drew on slide n, marked: tinted behind, and a
+/// bar in the left edge beside it. For the preview, to show where the
+/// editor's cursor is.
+pub fn focus(s: &mut Screen, talk: &Talk, n: usize, src: usize) {
+    let slide = &talk.slides[n];
+    let tint = s.theme.bg.mix(s.theme.accent, 0.22);
+    let tinted = |l: &[Cell]| -> Line { l.iter().map(|c| Cell { ch: c.ch, st: Style { bg: Some(tint), ..c.st } }).collect() };
+    // (row, col, cells) to tint; rows alone get the bar.
+    let mut marks: Vec<(i32, i32, Line)> = vec![];
+    let mut rows: Vec<i32> = vec![];
+    if let Some(d) = &slide.draw {
+        let (top, left) = canvas(s, d);
+        if slide.label_src == Some(src) {
+            if let Some(l) = label(s, slide, n) {
+                marks.push((top, s.mid(markup::width(&l)), l));
+            }
+        }
+        for (_, it) in d.groups.iter().flatten().filter(|(at, _)| *at == src) {
+            match it {
+                Item::Text(r, c, l) => marks.push((top + r, left + c, l.clone())),
+                Item::Center(r, l) => marks.push((top + r, left + (d.w - markup::width(l)) / 2, l.clone())),
+                Item::Box(r, c, bw, bh, t) => {
+                    let t: Line = t.iter().map(|x| Cell { ch: x.ch, st: Style { bold: true, ..x.st } }).collect();
+                    marks.push((top + r + 1, left + c + 2, t));
+                    let st = s.accent();
+                    for (r, c, ch) in border(top + r, left + c, *bw, *bh) {
+                        marks.push((r, c, vec![Cell { ch, st }]));
+                    }
+                }
+                Item::Path(pts, dotted) => {
+                    let pts: Vec<(i32, i32)> = pts.iter().map(|&(r, c)| (top + r, left + c)).collect();
+                    let st = s.accent();
+                    for (r, c, ch, _) in arrow(&pts, *dotted) {
+                        marks.push((r, c, vec![Cell { ch, st }]));
+                    }
+                }
+                Item::Clear(a, b) => rows.extend(top + a..=top + b),
+            }
+        }
+    } else if slide.images.is_empty() {
+        let (lrow, arow, _, brow) = layout(s, slide);
+        if slide.label_src == Some(src) {
+            if let Some(l) = label(s, slide, n) {
+                marks.push((lrow, s.mid(markup::width(&l)), l));
+            }
+        }
+        if slide.headline_src == Some(src) {
+            let aw = slide.art.first().map_or(0, |r| r.len() as i32);
+            for (i, r) in slide.art.iter().enumerate() {
+                let l: Line = r.iter().map(|&ch| Cell { ch, st: s.accent() }).collect();
+                marks.push((arow + i as i32, (s.w - aw) / 2 + 1, l));
+            }
+        }
+        for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| b.src == src) {
+            marks.push((brow + i as i32, s.mid(markup::width(&b.line)), b.line.clone()));
+        }
+    }
+    let bar = Cell { ch: '▌', st: s.accent() };
+    for (r, c, l) in &marks {
+        s.put(*r, *c, &tinted(l));
+        s.put(*r, 1, &[bar]);
+    }
+    for r in rows {
+        s.put(r, 1, &[bar]);
+    }
+}
