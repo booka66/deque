@@ -206,6 +206,9 @@ fn present(args: &[String]) -> Result<(), String> {
     loop {
         s.hurry = false;
         let slide = &talk.slides[n];
+        // Before the slide plays in, so the notes change with the key, not
+        // after the animation.
+        link.publish(n, shown);
         if mode == Mode::Arrive && started {
             fx::transition(&mut s, &talk.tr(slide));
         }
@@ -220,7 +223,6 @@ fn present(args: &[String]) -> Result<(), String> {
             s.put_str(s.h, 2, &format!("go to {jump}_  "), st);
         }
         s.flush();
-        link.publish(n, shown);
         mode = Mode::Still;
         // Wait for a key, looking every tenth of a second for a resize, the
         // talk saved, or the notes window asking for something.

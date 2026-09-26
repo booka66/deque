@@ -41,7 +41,7 @@ pub fn run(path: &Path, load: impl Fn(&Path) -> Result<Talk, String>) -> Result<
             last = frame;
             draw(&mut s, &talk, at, since, &jump);
         }
-        if !event::poll(Duration::from_millis(200)).unwrap_or(false) {
+        if !event::poll(Duration::from_millis(50)).unwrap_or(false) {
             continue;
         }
         let Ok(ev) = event::read() else { continue };
