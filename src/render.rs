@@ -821,6 +821,24 @@ pub fn small(s: &mut Screen, talk: &Talk, n: usize, (w, h): (i32, i32)) {
     s.raw("\x1b[?2026l");
 }
 
+/// Slide n as it first shows on a w×h screen, cell by cell, for what
+/// arrives to land on: (row, col, cell), the blanks left out.
+pub fn cells(talk: &Talk, n: usize, w: i32, h: i32) -> Vec<(i32, i32, Cell)> {
+    let slide = &talk.slides[n];
+    let mut s = Screen::recording(talk.theme.clone(), w, h);
+    s.keep();
+    match (&slide.draw, slide.images.is_empty()) {
+        (_, false) => return vec![],
+        (Some(d), _) => drawn(&mut s, talk, n, d, Mode::Still, 0),
+        (None, _) => text(&mut s, talk, n, Mode::Still, 0),
+    }
+    s.cells()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| c.filter(|c| c.ch != ' ' && c.ch != '\0').map(|c| (i as i32 / w + 1, i as i32 % w + 1, c)))
+        .collect()
+}
+
 /// What falls off a w×h screen of slide n shown whole: across, and down.
 fn clips(talk: &Talk, n: usize, w: i32, h: i32) -> (bool, bool) {
     let slide = &talk.slides[n];

@@ -10,6 +10,7 @@ mod graph;
 mod images;
 mod life;
 mod link;
+mod loader;
 mod lsp;
 mod markup;
 mod morph;
@@ -310,7 +311,37 @@ fn present(args: &[String]) -> Result<(), String> {
     // Left out, the one here.
     let path = path.or_else(|| found(Path::new("."))).ok_or(format!("{HELP}\n"))?;
     // Before the talk's read, so its slides can say where to watch.
+    // Opening a link takes a few seconds: meanwhile, the shell on the
+    // screen spins up into a galaxy, to land as the first slide.
+    let mut landing = None;
     let share = match sharing && !tv && !print {
+        true if !local && !calm && cast.is_none() && html.is_none() && std::io::stdout().is_terminal() => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let face = fine::face().filter(|_| own_font);
+            std::thread::spawn(move || {
+                let _ = tx.send(share::start(&markup::Theme::default(), curl, face, true));
+            });
+            let dir = path.parent().unwrap_or(Path::new("."));
+            let th = std::fs::read_to_string(&path).map(|src| talk::parse(&src, dir, true).0.theme).unwrap_or_default();
+            let mut ls = Screen::new(th.clone());
+            let rows = loader::capture(ls.h);
+            terminal::enable_raw_mode().map_err(|e| e.to_string())?;
+            ls.raw("\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J");
+            match loader::spin(&mut ls, &rows, &th, || rx.try_recv().ok()) {
+                Some((Ok(sh), motes)) => {
+                    landing = Some(motes);
+                    Some(sh)
+                }
+                Some((Err(e), _)) => {
+                    restore();
+                    return Err(e);
+                }
+                None => {
+                    restore();
+                    return Ok(());
+                }
+            }
+        }
         true => {
             if !local {
                 eprintln!("deque: opening a link, through Cloudflare…");
@@ -394,6 +425,13 @@ fn present(args: &[String]) -> Result<(), String> {
 
     let mut n = start.clamp(1, talk.slides.len()) - 1;
     let (mut mode, mut shown, mut started) = (Mode::Arrive, 0usize, false);
+    // The galaxy the link opened in, landing as this slide, which is then
+    // there already.
+    if let Some(motes) = landing.take() {
+        let targets = render::cells(&talk, n, s.w, s.h);
+        loader::land(&mut s, motes, targets);
+        mode = Mode::Still;
+    }
     let mut stamp = stamps(&path, &talk);
     let mut src = std::fs::read_to_string(&path).unwrap_or_default();
     let mut problem: Option<String> = None;
