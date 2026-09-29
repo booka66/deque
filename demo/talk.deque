@@ -264,6 +264,15 @@ by hand    0.5
 ```
 
 ---
+## how it's laid out
+```graph
+file -> parse -> slides -> screen
+> parse ..> lsp -> editor
+> screen -> watchers
+```
+{muted}`a -> b` lines in a graph block, laid out for you{/}
+
+---
 ## presenting
 # NOTES
 `// a line like this` in a slide is a speaker note

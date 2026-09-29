@@ -130,6 +130,8 @@ pub struct Slide {
     pub side: bool,
     pub draw: Option<Draw>,
     pub enter: Option<String>,
+    /// A recording to play on enter, instead of or before `enter`.
+    pub play: Option<PathBuf>,
     pub cols: Option<i32>,
     pub fx: Effects,
     /// The language of its first ```lang block.
@@ -475,6 +477,14 @@ fn slide(p: &mut P, lines: &[&str], start: usize, end: usize) -> Slide {
         }
         match k {
             "enter" => s.enter = Some(v),
+            "play" => {
+                let full = p.dir.join(&v);
+                p.files.push(full.clone());
+                match crate::replay::load(&full) {
+                    Ok(_) => s.play = Some(full),
+                    Err(e) => p.err(col, l.chars().count(), e),
+                }
+            }
             "cols" => match v.parse() {
                 Ok(n) if n >= 20 => s.cols = Some(n),
                 _ => p.err(col, l.chars().count(), "cols is a number of columns, 20 or more"),
@@ -490,12 +500,18 @@ fn slide(p: &mut P, lines: &[&str], start: usize, end: usize) -> Slide {
             _ => unreachable!(),
         }
     }
+    if s.play.is_some() && s.draw.is_some() {
+        p.n = start;
+        p.err(0, 3, "a drawn slide can't play a recording");
+    }
     if s.cols.is_some() && s.enter.is_none() {
         p.n = start;
         p.warn(0, 3, "cols does nothing without enter");
     }
     if let Some((w, h)) = draw_size {
         drawing(p, &mut s, lines, i, end, w, h);
+    } else if lines[i..end].iter().any(|l| l.trim_start().starts_with("```graph")) {
+        graph(p, &mut s, lines, i, end);
     } else {
         textual(p, &mut s, lines, i, end);
     }
@@ -864,20 +880,50 @@ fn open(p: &mut P, l: &str, info: &str, i: usize, ran: bool) -> Option<Open> {
                 None => p.err(at, l.chars().count(), "focus: lines to light, a step each, like focus: 2|4-5,8"),
             }
         } else {
-            // A file: path, path:10-24, or path#name.
+            // A file: path, path:10-24, or path#name; any of them @REV,
+            // as it was at that revision in git.
+            let (w, rev) = match w.rsplit_once('@') {
+                Some((f, r)) => (f, Some(r)),
+                None => (w, None),
+            };
             let cut = w.find(['#', ':']).unwrap_or(w.len());
             let full = p.dir.join(&w[..cut]);
-            p.files.push(full.clone());
-            match std::fs::read_to_string(&full) {
+            let text = match rev {
+                None => {
+                    p.files.push(full.clone());
+                    std::fs::read_to_string(&full).map_err(|_| format!("no file {}; after the language go run, focus: or a file", full.display()))
+                }
+                Some(r) => at_rev(p.dir, &w[..cut], r),
+            };
+            match text {
                 Ok(text) => match excerpt(&text, (cut < w.len()).then(|| &w[cut..])) {
                     Ok(got) => o.file = Some(got),
                     Err(e) => p.err(at, span, format!("{}: {e}", &w[..cut])),
                 },
-                Err(_) => p.err(at, span, format!("no file {}; after the language go run, focus: or a file", full.display())),
+                Err(e) => p.err(at, span, e),
             }
         }
     }
     Some(o)
+}
+
+/// A file as it was at a revision, by git, from the talk's folder.
+fn at_rev(dir: &Path, file: &str, rev: &str) -> Result<String, String> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return Err(format!("\"{rev}\" isn't a revision: after @ goes a commit, branch or tag, like @HEAD~2 or @v1.0"));
+    }
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("show")
+        .arg(format!("{rev}:./{file}"))
+        .output()
+        .map_err(|e| format!("{file}@{rev} needs git: {e}"))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("{file}@{rev}: {}", why.lines().next().unwrap_or("git couldn't show it").trim_start_matches("fatal: ")));
+    }
+    String::from_utf8(out.stdout).map_err(|_| format!("{file}@{rev} isn't text"))
 }
 
 /// A ``` block closing: a chart's bars, or code, highlighted, from its own
@@ -930,6 +976,178 @@ fn close(p: &mut P, s: &mut Slide, b: &mut Block, o: Open, opened: usize) {
     }
     b.focus = o.focus.into_iter().map(|g| g.into_iter().map(|k| k - 1).collect()).collect();
     s.lang.get_or_insert(o.lang);
+}
+
+/// A slide with a ```graph: drawn, its boxes and arrows laid out from its
+/// lines (`a -> b -> c`, `..>` dotted, `: label` after the last), left to
+/// right or, ```graph down, top to bottom; each `> ` line's on a step;
+/// lines after the graph centered under it.
+fn graph(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
+    // Each box's name, as written, and title; each arrow's ends, whether
+    // it's dotted, and the line it's from; what comes on each step.
+    let (mut names, mut titles): (Vec<String>, Vec<Line>) = (vec![], vec![]);
+    let mut arrows: Vec<(usize, usize, bool, Line)> = vec![];
+    let mut down = false;
+    let mut captions: Vec<(usize, Line, usize)> = vec![];
+    // What each step brings: new boxes, arrows (by index), and the line.
+    let mut groups: Vec<Vec<(usize, Result<usize, usize>)>> = vec![vec![]];
+    let (mut inside, mut seen) = (false, false);
+    for i in from..end {
+        p.n = i;
+        let l = lines[i];
+        if !inside {
+            if let Some(n) = l.strip_prefix("//") {
+                s.notes.push(n.strip_prefix(' ').unwrap_or(n).to_string());
+                continue;
+            }
+            if l.trim().is_empty() || heading(p, s, l) {
+                continue;
+            }
+        }
+        if let Some(info) = l.trim_start().strip_prefix("```") {
+            if inside {
+                inside = false;
+            } else if matches!(info.trim(), "graph" | "graph right" | "graph down") && !seen {
+                (inside, seen, down) = (true, true, info.trim() == "graph down");
+            } else {
+                p.err(0, l.chars().count(), "a graph slide has one ```graph, and no other blocks");
+            }
+            continue;
+        }
+        let (step, text, col) = match l.strip_prefix("> ") {
+            Some(t) => (true, t, 2),
+            None => (false, l, 0),
+        };
+        if step {
+            groups.push(vec![]);
+        }
+        let g = groups.len() - 1;
+        if !inside {
+            if seen {
+                let line = p.markup(text, col);
+                captions.push((i, line, g));
+            } else {
+                p.err(0, l.chars().count(), "text goes under the graph, after its closing ```");
+            }
+            continue;
+        }
+        if text.trim().is_empty() {
+            continue;
+        }
+        // A label for the last arrow: after it, `: label`.
+        let tail = ["->", "..>"].iter().filter_map(|a| text.rfind(a).map(|k| k + a.len())).max();
+        let (text, label) = match tail.and_then(|t| text[t..].find(": ").map(|k| t + k)) {
+            Some(k) => {
+                let at = col + text[..k + 2].chars().count();
+                (&text[..k], Some(p.markup(&text[k + 2..], at)))
+            }
+            None => (text, None),
+        };
+        // Names between arrows: -> and ..>, dotted.
+        let mut parts: Vec<(&str, bool)> = vec![];
+        let mut rest = text;
+        loop {
+            let next = [("->", false), ("..>", true)].into_iter().filter_map(|(a, d)| rest.find(a).map(|k| (k, a.len(), d))).min();
+            match next {
+                Some((k, len, d)) => {
+                    parts.push((&rest[..k], d));
+                    rest = &rest[k + len..];
+                }
+                None => {
+                    parts.push((rest, false));
+                    break;
+                }
+            }
+        }
+        let mut ids = vec![];
+        for (name, _) in &parts {
+            let name = name.trim();
+            if name.is_empty() {
+                p.err(col, l.chars().count(), "a box has a name: a -> b");
+                ids.clear();
+                break;
+            }
+            let k = match names.iter().position(|n| n == name) {
+                Some(k) => k,
+                None => {
+                    let at = col + text.find(name).map(|b| text[..b].chars().count()).unwrap_or(0);
+                    let t = p.markup(name, at);
+                    names.push(name.to_string());
+                    titles.push(t);
+                    groups[g].push((i, Ok(names.len() - 1)));
+                    names.len() - 1
+                }
+            };
+            ids.push(k);
+        }
+        let hops = ids.len().saturating_sub(1);
+        for (h, (w, (_, dotted))) in ids.windows(2).zip(&parts).enumerate() {
+            if w[0] == w[1] {
+                p.err(col, l.chars().count(), "an arrow from a box to itself");
+                continue;
+            }
+            let label = if h + 1 == hops { label.clone().unwrap_or_default() } else { vec![] };
+            arrows.push((w[0], w[1], *dotted, label));
+            groups[g].push((i, Err(arrows.len() - 1)));
+        }
+    }
+    if inside {
+        p.n = from;
+        p.err(0, 3, "a ``` with no ``` to close it");
+    }
+    if s.headline.is_some() {
+        p.n = s.line;
+        p.err(0, 3, "a graph slide has no headline: its label, the graph, and lines under it");
+    }
+    if names.is_empty() {
+        p.n = s.line;
+        p.err(0, 3, "an empty graph: lines like a -> b -> c");
+    }
+    let widths: Vec<i32> = titles.iter().map(|t| markup::width(t) + 4).collect();
+    let edges: Vec<crate::graph::Edge> = arrows.iter().map(|a| crate::graph::Edge { from: a.0, to: a.1, dotted: a.2, label: markup::width(&a.3) }).collect();
+    let l = crate::graph::layout(&widths, &edges, down);
+    // Two rows down, under the label.
+    let top = 2;
+    let paths: Vec<Vec<(i32, i32)>> = l.arrows.iter().map(|a| a.iter().map(|&(r, c)| (top + r, c)).collect()).collect();
+    let (warm, muted) = (Style::fg(p.theme.warm), p.theme.muted);
+    // Arrows drawn so far, as the steps go.
+    let mut drawn: Vec<usize> = vec![];
+    let mut draw: Vec<Vec<(usize, Item)>> = vec![];
+    for g in groups {
+        let mut items = vec![];
+        let fresh: Vec<usize> = g.iter().filter_map(|(_, it)| it.err()).collect();
+        // The step's own line, for what's added to it.
+        let line = g.first().map_or(s.line, |x| x.0);
+        for (i, it) in g {
+            items.push(match it {
+                Ok(k) => {
+                    let (r, c, w) = l.boxes[k];
+                    (i, Item::Box(top + r, c, w, 3, titles[k].clone()))
+                }
+                Err(e) => (i, Item::Path(paths[e].clone(), arrows[e].2)),
+            });
+        }
+        drawn.extend(&fresh);
+        // Where these arrows meet those before, and each other: joined.
+        let all: Vec<(Vec<(i32, i32)>, bool, bool)> = drawn.iter().map(|&e| (paths[e].clone(), arrows[e].2, fresh.contains(&e))).collect();
+        for (r, c, ch) in crate::graph::joins(&all) {
+            items.push((line, Item::Text(r, c, vec![markup::Cell { ch, st: warm }])));
+        }
+        // Labels last, over their arrows, faint where they set no color.
+        for &e in &fresh {
+            if let Some((r, c)) = l.labels[e] {
+                let text = arrows[e].3.iter().map(|x| markup::Cell { st: Style { fg: x.st.fg.or(Some(muted)), ..x.st }, ..*x }).collect();
+                items.push((line, Item::Text(top + r, c, text)));
+            }
+        }
+        draw.push(items);
+    }
+    let under = top + l.h + 1;
+    for (k, (i, line, g)) in captions.iter().enumerate() {
+        draw[*g].push((*i, Item::Center(under + k as i32, line.clone())));
+    }
+    let w = captions.iter().map(|c| markup::width(&c.1)).chain([l.w]).max().unwrap_or(0);
+    s.draw = Some(Draw { w, h: under + captions.len() as i32, groups: draw });
 }
 
 fn drawing(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize, w: i32, h: i32) {
@@ -1075,6 +1293,27 @@ mod tests {
         assert_eq!(excerpt(SRC, Some(":4-5")).unwrap(), ["if (o) {", "  return 0;"]);
         assert!(excerpt(SRC, Some(":40-50")).is_err());
         assert!(excerpt(SRC, Some("#nope")).is_err());
+    }
+
+    #[test]
+    fn code_as_it_was_in_git() {
+        let dir = std::env::temp_dir().join(format!("deque-git-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.ts"), "function fee() {\n  return 1;\n}\n").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one"]);
+        std::fs::write(dir.join("a.ts"), "function fee() {\n  return 2;\n}\n").unwrap();
+        let (t, d) = parse("---\n```ts a.ts#fee@HEAD\n```\n---\n```ts a.ts#fee\n```\n", &dir, false);
+        assert!(d.is_empty(), "{d:?}");
+        let line = |n: usize| markup::text(&t.slides[n].body[1].line);
+        assert_eq!((line(0).trim(), line(1).trim()), ("return 1;", "return 2;"));
+        // Code in the same language on the next slide: it morphs.
+        assert!(t.morphs(0, 1));
+        let (_, d) = parse("---\n```ts a.ts@nope\n```\n---\n```ts a.ts@-x\n```\n", &dir, false);
+        assert_eq!(d.len(), 2, "{d:?}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

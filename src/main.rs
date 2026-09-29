@@ -6,6 +6,7 @@ mod cast;
 mod code;
 mod fx;
 mod ghostty;
+mod graph;
 mod images;
 mod life;
 mod link;
@@ -14,9 +15,11 @@ mod markup;
 mod morph;
 mod notes;
 mod preview;
+mod rehearse;
 #[cfg(unix)]
 mod relay;
 mod render;
+mod replay;
 mod run;
 mod screen;
 mod share;
@@ -61,6 +64,9 @@ deque: slides in your terminal
   --cursor, --no-cursor   show or hide the cursor (the talk's `cursor:` otherwise)
   --calm                  nothing moves that needn't: no skies, glow,
                           flourishes, transitions or morphs (as calm: on)
+  --rehearse              present it as a practice run: when it's over, the
+                          time you spent on each slide is written into the
+                          talk as its time:, for deque notes to pace you by
   --share                 stream it live on the network, for anyone who can't
                           see, in a browser, over HTTPS (browsers warn once:
                           the certificate is deque's own): w shows the link
@@ -188,6 +194,11 @@ fn check(args: &[String]) -> Result<(), String> {
         if let Some((nw, nh)) = render::needs(&talk, n, w, h) {
             eprintln!("{}:{}:1: warning: slide {} needs {nw}x{nh}, more than {w}x{h}: cut off on a screen that size", path.display(), slide.line + 1, n + 1);
         }
+        if let Some(c) = slide.play.as_deref().and_then(|p| replay::load(p).ok())
+            && (c.w > w || c.h > h)
+        {
+            eprintln!("{}:{}:1: warning: slide {}'s recording is {}x{}, more than {w}x{h}: cut off on a screen that size", path.display(), slide.line + 1, n + 1, c.w, c.h);
+        }
     }
     Ok(())
 }
@@ -256,7 +267,7 @@ fn present(args: &[String]) -> Result<(), String> {
     let mut path: Option<PathBuf> = None;
     let (mut start, mut print, mut tv, mut cursor, mut sharing, mut curl) = (1usize, false, false, None, false, false);
     let mut own_font = true;
-    let mut calm = false;
+    let (mut calm, mut practice) = (false, false);
     let (mut cast, mut html, mut size) = (None, None, (100, 30));
     let mut rest = vec![];
     let mut it = args.iter();
@@ -271,6 +282,7 @@ fn present(args: &[String]) -> Result<(), String> {
             "--no-cursor" => cursor = Some(false),
             "--share" => sharing = true,
             "--calm" => calm = true,
+            "--rehearse" => practice = true,
             "--share-curl" => (sharing, curl) = (true, true),
             "--share-no-font" => (sharing, own_font) = (true, false),
             _ if a.starts_with('-') => return Err(format!("deque: no option {a}\n\n{HELP}\n")),
@@ -285,7 +297,8 @@ fn present(args: &[String]) -> Result<(), String> {
             rest.push(a.clone());
         }
     }
-    let path = path.ok_or(format!("{HELP}\n"))?;
+    // Left out, the one here.
+    let path = path.or_else(|| found(Path::new("."))).ok_or(format!("{HELP}\n"))?;
     // Before the talk's read, so its slides can say where to watch.
     let share = match sharing && !tv && !print {
         true => Some(share::start(&markup::Theme::default(), curl, fine::face().filter(|_| own_font))?),
@@ -383,7 +396,17 @@ fn present(args: &[String]) -> Result<(), String> {
     let mut small = false;
     // The screen's as it should be but for a note: only that's drawn.
     let mut hold = false;
+    // Rehearsing: how long each slide's been up, and since when this one.
+    let mut spent = vec![0.0f64; talk.slides.len()];
+    let mut since = Instant::now();
+    let mut on = n;
     loop {
+        if n != on {
+            if let Some(t) = spent.get_mut(on) {
+                *t += since.elapsed().as_secs_f64();
+            }
+            (on, since) = (n, Instant::now());
+        }
         s.hurry = false;
         let slide = &talk.slides[n];
         if hold {
@@ -496,6 +519,7 @@ fn present(args: &[String]) -> Result<(), String> {
                             let edited = changed(&src, &talk, &new, &t);
                             talk = t;
                             adopt(&mut talk, term_bg, calm);
+                            spent.resize(talk.slides.len(), 0.0);
                             stamp = stamps(&path, &talk);
                             src = new;
                             ran.clear();
@@ -535,7 +559,7 @@ fn present(args: &[String]) -> Result<(), String> {
                 jump.clear();
                 Act::Goto(k)
             }
-            Act::Live if slide.enter.is_none() => Act::Next,
+            Act::Live if slide.enter.is_none() && slide.play.is_none() => Act::Next,
             a => a,
         };
         // Anything but a quit: the first q forgotten.
@@ -576,7 +600,24 @@ fn present(args: &[String]) -> Result<(), String> {
             Act::Last => (n, shown) = (last, talk.slides[last].steps()),
             Act::Goto(k) => (n, shown, mode) = (k.min(last), 0, Mode::Arrive),
             Act::Replay => (shown, mode, started) = (0, render::arrive(&talk, n), false),
-            Act::Live => live(&mut s, &talk, slide, font.as_ref(), &enter),
+            Act::Live => {
+                // The recording first, if there's one; from it, the real thing.
+                let go = match &slide.play {
+                    Some(p) => match replay::load(p) {
+                        Ok(c) => matches!(replay::play(&mut s, &c, slide.enter.is_some()), replay::Then::Live),
+                        Err(e) => {
+                            problem = Some(e);
+                            false
+                        }
+                    },
+                    None => true,
+                };
+                if go {
+                    live(&mut s, &talk, slide, font.as_ref(), &enter);
+                } else {
+                    s.raw(&enter);
+                }
+            }
             Act::Overview => {
                 if let Some(k) = render::overview(&mut s, &talk, n) {
                     (n, shown, mode) = (k, 0, Mode::Arrive);
@@ -610,6 +651,32 @@ fn present(args: &[String]) -> Result<(), String> {
         sh.hub.end();
     }
     restore();
+    if practice {
+        if let Some(t) = spent.get_mut(on) {
+            *t += since.elapsed().as_secs_f64();
+        }
+        return practiced(&path, &talk, &spent);
+    }
+    Ok(())
+}
+
+/// A practice run over: each slide it was on for a second or more gets
+/// the time it took as its `time:`, written into the talk.
+fn practiced(path: &Path, talk: &Talk, spent: &[f64]) -> Result<(), String> {
+    let times: Vec<Option<u32>> = spent.iter().map(|&t| (t >= 1.0).then(|| rehearse::round(t))).collect();
+    let n = times.iter().flatten().count();
+    if n == 0 {
+        return Ok(());
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| format!("deque: {}: {e}\n", path.display()))?;
+    // Read again, as it is now, in case it was saved since.
+    let now = load(path, true)?;
+    if now.slides.len() != talk.slides.len() {
+        return Err(format!("deque: {} changed its slides while you practiced; times not written\n", path.display()));
+    }
+    std::fs::write(path, rehearse::with_times(&src, &now, &times)).map_err(|e| format!("deque: {}: {e}\n", path.display()))?;
+    let total: u32 = times.iter().flatten().sum();
+    eprintln!("{n} slides timed, {} in all: written to {} as each slide's time:", rehearse::say(total), path.display());
     Ok(())
 }
 

@@ -351,7 +351,7 @@ fn head(d: (i32, i32)) -> char {
 }
 
 /// Every cell of an arrow, with the way it goes there, its head last.
-fn arrow(pts: &[(i32, i32)], dotted: bool) -> Vec<(i32, i32, char, (i32, i32))> {
+pub fn arrow(pts: &[(i32, i32)], dotted: bool) -> Vec<(i32, i32, char, (i32, i32))> {
     let dir = |a: (i32, i32), b: (i32, i32)| ((b.0 - a.0).signum(), (b.1 - a.1).signum());
     let line = |d: (i32, i32)| match (d.0 != 0, dotted) {
         (false, false) => '─',
