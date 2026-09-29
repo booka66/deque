@@ -375,189 +375,320 @@ fn control(c: &mut impl Write, hub: &Hub, method: &str, rest: &str) -> bool {
 /// The remote: where the talk is, the notes, next and back, and a pad
 /// the screen's shape to point with.
 fn remote_page(token: &str) -> String {
-    r#"<!doctype html>
+    r##"<!doctype html>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1d2021">
 <title>deque · remote</title>
 <style>
-*{box-sizing:border-box}
-html,body{margin:0;height:100%;background:#1d2021;color:#ebdbb2;font:16px ui-monospace,Menlo,monospace}
-body{display:flex;flex-direction:column;padding:12px;gap:10px;user-select:none;-webkit-user-select:none}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
+html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;background:#1d2021;color:#ebdbb2;font:16px ui-monospace,Menlo,monospace;-webkit-text-size-adjust:100%;text-size-adjust:100%;touch-action:none;user-select:none;-webkit-user-select:none}
+body{position:fixed;inset:0}
+#app{position:fixed;left:50%;top:50%;width:100vw;height:100vh;transform:translate(-50%,-50%);display:flex;flex-direction:column;gap:10px;padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
 #top{display:flex;justify-content:space-between;color:#928374}
+#where.off{color:#fb4934}
 #title{font-weight:bold;color:#fabd2f;font-size:20px}
-#notes{flex:1;overflow:auto;white-space:pre-wrap;line-height:1.4;min-height:60px}
+#notes{flex:1;overflow:auto;white-space:pre-wrap;line-height:1.4;min-height:60px;touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 #next{color:#928374}
-#pad{position:relative;width:100%;border:1px solid #504945;border-radius:10px;touch-action:none;background:#282828}
-#dot{position:absolute;width:12px;height:12px;border-radius:6px;background:#fb4934;transform:translate(-6px,-6px);display:none;box-shadow:0 0 12px #fb4934}
-#keys,#aimrow{display:flex;gap:10px}
-button{flex:1;font:inherit;font-size:22px;padding:22px 0;border:0;border-radius:12px;background:#3c3836;color:#ebdbb2}
+#pad{position:relative;flex:none;width:100%;border:1px solid #504945;border-radius:10px;touch-action:none;background:#282828;overflow:hidden}
+#pad.held{border-color:#fb4934;background:#2e2626}
+#label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#665c54;font-size:14px;text-align:center;padding:8px;pointer-events:none}
+#dot{position:absolute;width:12px;height:12px;border-radius:6px;background:#fb4934;transform:translate(-6px,-6px);display:none;box-shadow:0 0 12px #fb4934;pointer-events:none}
+#aimrow,#keys{display:flex;gap:10px}
+button{flex:1;font:inherit;font-size:22px;padding:22px 0;border:0;border-radius:12px;background:#3c3836;color:#ebdbb2;touch-action:manipulation}
+button:active{filter:brightness(1.3)}
 #go{flex:2;background:#fabd2f;color:#1d2021;font-weight:bold}
 .small{font-size:16px;padding:12px 0}
 #aim.on{background:#fb4934;color:#1d2021}
 #hint{color:#928374;font-size:13px;min-height:1em}
 </style>
+<div id="app">
 <div id="top"><span id="where">…</span><span id="clock"></span></div>
 <div id="title"></div>
 <div id="notes"></div>
 <div id="next"></div>
-<div id="pad"><div id="dot"></div></div>
-<div id="aimrow"><button id="aim" class="small">aim</button><button id="center" class="small" hidden>center</button><button id="corner" class="small" hidden>corner</button></div>
+<div id="pad"><div id="label"></div><div id="dot"></div></div>
+<div id="aimrow"><button id="aim" class="small">point with the phone</button><button id="speed" class="small" hidden></button></div>
 <div id="hint"></div>
 <div id="keys"><button id="back">back</button><button id="go">next</button></div>
+</div>
 <script src="/TOKEN/remote.js"></script>
-"#
+"##
     .replace("TOKEN", token)
 }
 
 /// The remote's script. Its own address holds the token, so everything it
 /// asks for is relative to that.
-const REMOTE_JS: &str = r#"const base = location.pathname.replace(/\/$/, "") + "/";
+const REMOTE_JS: &str = r##"const base = location.pathname.replace(/\/$/, "") + "/";
 const $ = id => document.getElementById(id);
-const post = p => fetch(base + p, {method: "POST"}).catch(() => {});
-$("go").onclick = () => post("do/next");
-$("back").onclick = () => post("do/back");
-let started = Date.now(), aspect = 16 / 9;
+const post = (p, keep) => fetch(base + p, {method: "POST", keepalive: !!keep}).catch(() => {});
+const clamp = v => Math.min(1, Math.max(0, v));
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+
+// Nothing zooms: not a pinch, not a double tap, not iOS's own gestures;
+// nothing scrolls but the notes.
+for (const g of ["gesturestart", "gesturechange", "gestureend"]) document.addEventListener(g, e => e.preventDefault(), {passive: false});
+document.addEventListener("touchmove", e => {
+  if (e.touches.length > 1 || !e.target.closest("#notes")) e.preventDefault();
+}, {passive: false});
+document.addEventListener("dblclick", e => e.preventDefault(), {passive: false});
+let lastEnd = 0;
+document.addEventListener("touchend", e => {
+  // A second tap that quick is a zoom, to iOS, unless it's stopped; on the
+  // buttons it's a second press, so it's pressed here.
+  const now = Date.now();
+  if (now - lastEnd < 350 && e.target.closest("button")) {
+    e.preventDefault();
+    e.target.closest("button").click();
+  }
+  lastEnd = now;
+}, {passive: false});
+
+// Upright whichever way the phone thinks it's turned: where it can, it's
+// held portrait (full screen, locked); where it can't, the page turns
+// back against it.
+let turn = 0;
+function angle() {
+  const a = screen.orientation && typeof screen.orientation.angle === "number" ? screen.orientation.angle : (window.orientation || 0);
+  return ((a % 360) + 360) % 360;
+}
+function orient() {
+  const app = $("app"), a = angle();
+  turn = innerWidth > innerHeight && (a === 90 || a === 270) ? a : 0;
+  app.style.width = (turn ? innerHeight : innerWidth) + "px";
+  app.style.height = (turn ? innerWidth : innerHeight) + "px";
+  app.style.transform = `translate(-50%, -50%) rotate(${-turn}deg)`;
+  size();
+}
+addEventListener("resize", orient);
+addEventListener("orientationchange", () => setTimeout(orient, 50));
+if (screen.orientation) screen.orientation.addEventListener("change", orient);
+
+// Awake while it's open: a remote that sleeps mid-talk isn't one.
+let lock = null;
+async function awake() {
+  try {
+    if (navigator.wakeLock && document.visibilityState === "visible" && !lock) {
+      lock = await navigator.wakeLock.request("screen");
+      lock.addEventListener("release", () => (lock = null));
+    }
+  } catch (e) {}
+}
+document.addEventListener("visibilitychange", awake);
+let first = true;
+addEventListener("pointerdown", () => {
+  awake();
+  if (!first) return;
+  first = false;
+  const d = document.documentElement;
+  if (d.requestFullscreen && matchMedia("(pointer: coarse)").matches) {
+    d.requestFullscreen({navigationUI: "hide"}).then(() => screen.orientation && screen.orientation.lock && screen.orientation.lock("portrait")).catch(() => {});
+  }
+});
+awake();
+
+function buzz() { if (navigator.vibrate) navigator.vibrate(8); }
+$("go").onclick = () => { buzz(); post("do/next", true); };
+$("back").onclick = () => { buzz(); post("do/back", true); };
+
+let started = Date.now(), aspect = 16 / 9, misses = 0;
 async function poll() {
   try {
     const s = await (await fetch(base + "state", {cache: "no-store"})).json();
+    misses = 0;
+    $("where").classList.remove("off");
     $("where").textContent = s.n ? `${s.n} / ${s.total}` + (s.steps ? ` · step ${s.shown}/${s.steps}` : "") : "…";
     $("title").textContent = s.title || "";
-    $("notes").textContent = (s.notes || []).join("\n");
+    const notes = (s.notes || []).join("\n");
+    if ($("notes").textContent !== notes) { $("notes").textContent = notes; $("notes").scrollTop = 0; }
     $("next").textContent = s.next ? "next · " + s.next : "the end";
-    if (s.w && s.h) aspect = s.w / (s.h * 2);
-    size();
-  } catch (e) {}
+    if (s.w && s.h && Math.abs(aspect - s.w / (s.h * 2)) > 0.01) { aspect = s.w / (s.h * 2); size(); }
+  } catch (e) {
+    if (++misses > 1) {
+      $("where").classList.add("off");
+      $("where").textContent = "reconnecting…";
+    }
+  }
   setTimeout(poll, 600);
 }
 function size() {
   const pad = $("pad");
-  pad.style.height = Math.min(pad.clientWidth / aspect, innerHeight * 0.4) + "px";
+  pad.style.height = Math.min(pad.clientWidth / aspect, $("app").clientHeight * 0.4) + "px";
 }
 setInterval(() => {
   const e = Math.floor((Date.now() - started) / 1000);
   $("clock").textContent = Math.floor(e / 60) + ":" + String(e % 60).padStart(2, "0");
 }, 1000);
-// The pad: a finger on it is the pointer on the screen; a tap, a ring.
-let last = 0, moved = false;
-function at(t) {
-  const r = $("pad").getBoundingClientRect();
-  const x = Math.min(1, Math.max(0, (t.clientX - r.left) / r.width));
-  const y = Math.min(1, Math.max(0, (t.clientY - r.top) / r.height));
-  $("dot").style.display = "block";
-  $("dot").style.left = x * r.width + "px";
-  $("dot").style.top = y * r.height + "px";
-  return [x.toFixed(4), y.toFixed(4)];
-}
-$("pad").addEventListener("touchstart", e => { moved = false; at(e.touches[0]); e.preventDefault(); }, {passive: false});
-$("pad").addEventListener("touchmove", e => {
-  moved = true;
-  const [x, y] = at(e.touches[0]);
-  const now = Date.now();
-  if (now - last > 30) { last = now; post(`point/${x}/${y}`); }
-  e.preventDefault();
-}, {passive: false});
-$("pad").addEventListener("touchend", e => {
-  // Aiming, a tap is a ring where the phone points.
-  if (aiming && !moved) { ring(); e.preventDefault(); return; }
-  const [x, y] = at(e.changedTouches[0]);
-  post(`${moved ? "point" : "tap"}/${x}/${y}`);
-  e.preventDefault();
-}, {passive: false});
 
-// Aiming: the phone held like a remote, top toward the screen. Which way
-// it points, from its motion sensors, against where it pointed when
-// centered, and how far it turned and tilted to the top-right corner: the
-// screen as big as it looks from here, whichever way this phone counts.
-// Till a corner's been shown it, 20 degrees to the side, 12 up.
-let aiming = false, zero = null, look = null, aimed = [0.5, 0.5], sending = false, lastAim = 0;
-let corner = [-20, 12];
-try {
-  const kept = JSON.parse(localStorage.getItem("deque-corner"));
-  if (Array.isArray(kept) && kept.length === 2) corner = kept;
-} catch (e) {}
-const turned = () => [((look[0] - zero[0] + 540) % 360) - 180, look[1] - zero[1]];
-function dot(x, y) {
-  const r = $("pad").getBoundingClientRect();
+// Where the pointer is, as fractions of the screen, and sending it: as
+// often as the last one's answered, at most 30 a second.
+let pos = [0.5, 0.5], sending = false, lastSent = 0;
+function dot() {
+  const p = $("pad");
   $("dot").style.display = "block";
-  $("dot").style.left = x * r.width + "px";
-  $("dot").style.top = y * r.height + "px";
+  $("dot").style.left = pos[0] * p.clientWidth + "px";
+  $("dot").style.top = pos[1] * p.clientHeight + "px";
 }
-function ring() { post(`tap/${aimed[0].toFixed(4)}/${aimed[1].toFixed(4)}`); }
-function aim(e) {
-  if (e.alpha == null || e.beta == null) return;
-  look = [e.alpha, e.beta];
-  if (!zero) zero = look;
-  const [turn, tilt] = turned();
-  const x = Math.min(1, Math.max(0, 0.5 + 0.5 * turn / corner[0]));
-  const y = Math.min(1, Math.max(0, 0.5 - 0.5 * tilt / corner[1]));
-  aimed = [x, y];
-  dot(x, y);
-  // As often as the last one's answered, at most 30 a second.
+function point(force) {
+  dot();
   const now = Date.now();
-  if (!sending && now - lastAim > 33) {
-    lastAim = now;
-    sending = true;
-    post(`point/${x.toFixed(4)}/${y.toFixed(4)}`).finally(() => (sending = false));
-  }
+  if (!force && (sending || now - lastSent < 33)) return;
+  lastSent = now;
+  sending = true;
+  post(`point/${pos[0].toFixed(4)}/${pos[1].toFixed(4)}`).finally(() => (sending = false));
 }
-$("aim").onclick = async () => {
-  if (aiming) {
-    removeEventListener("deviceorientation", aim);
-    aiming = false;
-    $("aim").classList.remove("on");
-    $("aim").textContent = "aim";
-    $("center").hidden = true;
-    $("corner").hidden = true;
-    $("hint").textContent = "";
-    return;
+function ring() { buzz(); post(`tap/${pos[0].toFixed(4)}/${pos[1].toFixed(4)}`); }
+
+// A place on the pad, from a place on the page, the page turned or not.
+function padAt(t) {
+  const r = $("pad").getBoundingClientRect();
+  const u = (t.clientX - r.left) / r.width, v = (t.clientY - r.top) / r.height;
+  const [x, y] = turn === 90 ? [1 - v, u] : turn === 270 ? [v, 1 - u] : [u, v];
+  return [clamp(x), clamp(y)];
+}
+
+// Two ways to point. By finger: the pad is the screen, the pointer where
+// the finger is. By the phone, like a presenter's clicker: hold the pad
+// and the pointer moves as the phone turns, from the middle, or from where
+// it was if you only just let go; it never needs setting up, and if it's
+// off, push it to the edge and it catches up, as a mouse does. A finger
+// sliding meanwhile nudges it.
+let motion = false, holding = false, heldAt = 0, lastUp = 0, travelled = 0, from = null;
+const SPEEDS = [["slow", 50], ["medium", 32], ["fast", 20]];
+let speed = Math.min(2, Math.max(0, parseInt(store.get("deque-speed") || "1", 10) || 0));
+function label() {
+  $("label").textContent = motion ? "hold here and point the phone · tap for a ring" : "drag to point · tap for a ring";
+  $("speed").textContent = "speed: " + SPEEDS[speed][0];
+  $("speed").hidden = !motion;
+  $("aim").classList.toggle("on", motion);
+  $("aim").textContent = motion ? "pointing with the phone" : "point with the phone";
+}
+$("speed").onclick = () => { speed = (speed + 1) % SPEEDS.length; store.set("deque-speed", speed); label(); };
+
+const pad = $("pad");
+pad.addEventListener("touchstart", e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  from = padAt(t);
+  travelled = 0;
+  heldAt = Date.now();
+  if (motion) {
+    holding = true;
+    pad.classList.add("held");
+    if (Date.now() - lastUp > 1500) pos = [0.5, 0.5];
+  } else {
+    pos = from;
   }
-  if (!window.isSecureContext) {
-    $("hint").textContent = "aiming needs the https link";
-    return;
+  point(true);
+}, {passive: false});
+pad.addEventListener("touchmove", e => {
+  e.preventDefault();
+  const at = padAt(e.touches[0]);
+  if (motion) {
+    pos = [clamp(pos[0] + at[0] - from[0]), clamp(pos[1] + at[1] - from[1])];
+  } else {
+    pos = at;
   }
+  travelled += Math.abs(at[0] - from[0]) + Math.abs(at[1] - from[1]);
+  from = at;
+  point();
+}, {passive: false});
+function up(e) {
+  e.preventDefault();
+  if (holding) { holding = false; lastUp = Date.now(); pad.classList.remove("held"); }
+  if (Date.now() - heldAt < 350 && travelled < 0.03) ring();
+  else point(true);
+}
+pad.addEventListener("touchend", up, {passive: false});
+pad.addEventListener("touchcancel", up, {passive: false});
+// With a mouse, for trying it on a laptop.
+pad.addEventListener("mousemove", e => { if (e.buttons && !motion) { pos = padAt(e); point(); } });
+pad.addEventListener("click", e => { if (!motion) { pos = padAt(e); ring(); } });
+// Held still, the pointer's said again, so it doesn't fade on the screen.
+setInterval(() => { if (holding) point(true); }, 400);
+
+// Which way is up, in the phone's own axes, from its tilt; and the phone
+// turning, from its gyroscope: turning about up moves the pointer across;
+// tipping what points at the screen (its top, or its back when it's held
+// upright) moves it up and down. However it's held or rolled.
+let upv = [0, 0, 1], lastT = 0;
+const D = Math.PI / 180;
+function tilt(e) {
+  if (e.beta == null || e.gamma == null) return;
+  const b = e.beta * D, g = e.gamma * D;
+  upv = [-Math.cos(b) * Math.sin(g), Math.sin(b), Math.cos(b) * Math.cos(g)];
+}
+function spin(e) {
+  const r = e.rotationRate;
+  if (!r || r.alpha == null) return;
+  const now = e.timeStamp || performance.now();
+  const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
+  lastT = now;
+  if (!holding || !dt) return;
+  const w = [r.beta, r.gamma, r.alpha];
+  const dotp = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const p = Math.abs(upv[1]) < Math.abs(upv[2]) ? [0, 1, 0] : [0, 0, -1];
+  let h = [p[1] * upv[2] - p[2] * upv[1], p[2] * upv[0] - p[0] * upv[2], p[0] * upv[1] - p[1] * upv[0]];
+  const n = Math.hypot(h[0], h[1], h[2]) || 1;
+  h = h.map(v => v / n);
+  // A hand held still still shakes a little: that's left out.
+  const calm = v => Math.abs(v) < 1.2 ? 0 : v - Math.sign(v) * 1.2;
+  const yaw = calm(dotp(w, upv)), pitch = calm(dotp(w, h));
+  const span = SPEEDS[speed][1];
+  const dx = -yaw * dt / span, dy = -pitch * dt / span * aspect;
+  if (!dx && !dy) return;
+  pos = [clamp(pos[0] + dx), clamp(pos[1] + dy)];
+  travelled += Math.abs(dx) + Math.abs(dy);
+  point();
+}
+
+async function allowed() {
   // iPhones ask first, and only on a tap.
-  if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) {
-    try {
-      if ((await DeviceOrientationEvent.requestPermission()) !== "granted") {
-        $("hint").textContent = "motion wasn't allowed";
-        return;
-      }
-    } catch (e) {
-      $("hint").textContent = "motion wasn't allowed";
-      return;
+  for (const E of [window.DeviceMotionEvent, window.DeviceOrientationEvent]) {
+    if (E && typeof E.requestPermission === "function") {
+      try { if ((await E.requestPermission()) !== "granted") return false; } catch (e) { return false; }
     }
   }
-  zero = null;
-  addEventListener("deviceorientation", aim);
-  aiming = true;
-  $("aim").classList.add("on");
-  $("aim").textContent = "stop aiming";
-  $("center").hidden = false;
-  $("corner").hidden = false;
-  $("hint").textContent = "aim at the middle of the screen, tap center; then at its top-right corner, tap corner";
-};
-$("center").onclick = () => {
-  if (!look) return;
-  zero = look;
-  $("hint").textContent = "now aim at the top-right corner and tap corner (tap the pad for a ring)";
-};
-$("corner").onclick = () => {
-  if (!look || !zero) return;
-  const [turn, tilt] = turned();
-  // Too near the middle to tell the screen's size from.
-  if (Math.abs(turn) < 2 || Math.abs(tilt) < 1) {
-    $("hint").textContent = "that's close to the middle: aim right at the top-right corner and tap corner again";
+  return true;
+}
+function start() {
+  addEventListener("devicemotion", spin);
+  addEventListener("deviceorientation", tilt);
+  motion = true;
+  store.set("deque-aim", "phone");
+  $("hint").textContent = "";
+  label();
+}
+$("aim").onclick = async () => {
+  if (motion) {
+    removeEventListener("devicemotion", spin);
+    removeEventListener("deviceorientation", tilt);
+    motion = false;
+    store.set("deque-aim", "finger");
+    label();
     return;
   }
-  corner = [turn, tilt];
-  try { localStorage.setItem("deque-corner", JSON.stringify(corner)); } catch (e) {}
-  $("hint").textContent = "set: " + Math.round(Math.abs(turn) * 2) + "° wide, " + Math.round(Math.abs(tilt) * 2) + "° tall; tap center again if it drifts";
+  if (!window.isSecureContext) { $("hint").textContent = "pointing with the phone needs the https link"; return; }
+  if (!window.DeviceMotionEvent) { $("hint").textContent = "this browser can't tell how the phone moves"; return; }
+  if (!(await allowed())) { $("hint").textContent = "motion wasn't allowed: Settings › Safari › Motion & Orientation Access"; return; }
+  start();
 };
-$("pad").addEventListener("mousemove", e => { if (e.buttons) { const [x, y] = at(e); post(`point/${x}/${y}`); } });
-$("pad").addEventListener("click", e => { const [x, y] = at(e); post(`tap/${x}/${y}`); });
-addEventListener("resize", size);
+// Pointing with the phone last time: again, where no tap's needed to ask.
+if (store.get("deque-aim") === "phone" && window.isSecureContext && window.DeviceMotionEvent) {
+  if (typeof DeviceMotionEvent.requestPermission === "function") $("hint").textContent = "tap “point with the phone” to point with it again";
+  else start();
+}
+
+label();
+orient();
 poll();
-"#;
+"##;
 
 /// A page or script, told not to be framed, sniffed, or named to anyone
 /// it fetches from: its address holds the token.
