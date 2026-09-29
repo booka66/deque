@@ -10,9 +10,13 @@
 //! terminal, never reaches a watcher, so a terminal piping the stream in
 //! is left as it was found.
 //!
-//! Watching is all it does, and only for those given the link: every path
-//! carries a random token, anything else is a 404. Nothing a watcher sends
-//! is read past the request line, echoed, or kept. Each watcher can hold
+//! Watching, reacting and voting are all it does, and only for those given
+//! the link: every path carries a random token, anything else is a 404.
+//! What a watcher sends back is a number: which of a few emoji they
+//! reacted with, or which of the poll's choices they picked (and a random
+//! name their browser made, so a second vote replaces the first). No text
+//! of theirs reaches the screen. Nothing else a watcher sends is read past
+//! the request line, echoed, or kept. Each watcher can hold
 //! only so much unsent before it's let go, a request must come quickly, and
 //! only so many are served at once, so a slow or hostile one can't take
 //! memory or threads from the talk. It's plain HTTP: anyone on the network
@@ -24,15 +28,36 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// At most this many connections at once, watching or asking.
-const MOST: usize = 32;
+const MOST: usize = 128;
 /// Frames a watcher may fall behind by before it's let go.
 const BEHIND: usize = 256;
 /// How long a request may take to arrive, and a write to go out.
 const PATIENCE: Duration = Duration::from_secs(5);
+/// What's drawn is kept, this many frames and bytes of it at most, for
+/// pages to ask for what they haven't had.
+const KEPT: usize = 512;
+const KEPT_BYTES: usize = 8 << 20;
+/// How long a page's ask for more waits for something to be drawn.
+const WAIT: Duration = Duration::from_secs(20);
+/// Reactions waiting for the screen, at most; past that, they're dropped.
+const REACTING: usize = 32;
+/// Voters a poll keeps, at most.
+const VOTERS: usize = 2000;
+
+/// What watchers can react with.
+pub const REACTIONS: [char; 6] = ['👏', '🔥', '😂', '🤯', '🎉', '👀'];
+
+/// The poll on the screen: its name, its question, and its choices.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Poll {
+    pub id: String,
+    pub question: String,
+    pub choices: Vec<String>,
+}
 
 /// xterm.js, pinned to the version and the bytes: a browser won't run it
 /// if the CDN hands over anything else.
@@ -55,6 +80,10 @@ pub enum Touch {
 
 struct Inner {
     viewers: Mutex<Vec<SyncSender<Arc<[u8]>>>>,
+    /// What's been drawn lately, for pages: each frame numbered, the
+    /// number the next will have, and a wake for those waiting on it.
+    log: Mutex<Log>,
+    more: Condvar,
     /// Someone new is watching: the slide wants drawing again, whole.
     joined: AtomicBool,
     /// Connections open now.
@@ -77,6 +106,19 @@ struct Inner {
     state: Mutex<String>,
     /// The terminal's font, for the page to draw in, and its type.
     font: Option<(Vec<u8>, &'static str)>,
+    /// Reactions come in, by their place in REACTIONS, for the screen.
+    reactions: Mutex<Vec<usize>>,
+    /// The poll open now, if any.
+    poll: Mutex<Option<Poll>>,
+    /// Each poll's votes, by its name: each voter's choice.
+    votes: Mutex<std::collections::HashMap<String, std::collections::HashMap<String, usize>>>,
+    /// A vote's come in since the screen last asked.
+    voted: AtomicBool,
+    /// This machine's address on the network, and whether the links go
+    /// through a tunnel: then pages ask to connect to that address
+    /// straight, if they can.
+    ip: std::net::IpAddr,
+    public: bool,
 }
 
 impl Hub {
@@ -103,6 +145,16 @@ impl Hub {
         }
         let b: Arc<[u8]> = b.into();
         self.0.viewers.lock().unwrap().retain(|v| v.try_send(b.clone()).is_ok());
+        let mut log = self.0.log.lock().unwrap();
+        log.bytes += b.len();
+        log.frames.push_back(b);
+        log.next += 1;
+        while log.frames.len() > KEPT || log.bytes > KEPT_BYTES {
+            let f = log.frames.pop_front().unwrap();
+            log.bytes -= f.len();
+        }
+        drop(log);
+        self.0.more.notify_all();
     }
 
     /// Whether anyone's joined since last asked.
@@ -130,9 +182,60 @@ impl Hub {
         *self.0.state.lock().unwrap() = json;
     }
 
+    /// A new watcher: what's drawn from here on, the slide drawn again,
+    /// whole, to start them off.
+    pub fn viewer(&self) -> mpsc::Receiver<Arc<[u8]>> {
+        let (tx, rx) = mpsc::sync_channel(BEHIND);
+        self.0.viewers.lock().unwrap().push(tx);
+        self.0.joined.store(true, Ordering::Relaxed);
+        rx
+    }
+
+    /// Reactions since last asked, by their place in REACTIONS.
+    pub fn reactions(&self) -> Vec<usize> {
+        std::mem::take(&mut *self.0.reactions.lock().unwrap())
+    }
+
+    /// The poll on the screen now, or none.
+    pub fn poll(&self, p: Option<Poll>) {
+        *self.0.poll.lock().unwrap() = p;
+    }
+
+    /// How many voted for each of the poll's choices.
+    pub fn tally(&self, p: &Poll) -> Vec<usize> {
+        let mut n = vec![0; p.choices.len()];
+        if let Some(v) = self.0.votes.lock().unwrap().get(&p.id) {
+            for &k in v.values() {
+                if let Some(c) = n.get_mut(k) {
+                    *c += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Whether anyone's voted since last asked.
+    pub fn voted(&self) -> bool {
+        self.0.voted.swap(false, Ordering::Relaxed)
+    }
+
     /// The end, said to everyone still watching.
     pub fn end(&self) {
         self.send(b"\x1b[0m\x1b[2J\x1b[H\x1b[?25hthe talk's over. thanks for watching.\r\n", 0, 0);
+    }
+}
+
+/// The frames lately drawn, the last of them numbered `next - 1`.
+#[derive(Default)]
+struct Log {
+    frames: std::collections::VecDeque<Arc<[u8]>>,
+    bytes: usize,
+    next: u64,
+}
+
+impl Log {
+    fn first(&self) -> u64 {
+        self.next - self.frames.len() as u64
     }
 }
 
@@ -145,6 +248,64 @@ pub struct Share {
     /// plain HTTP, whoever's on the network between can write to a
     /// terminal that pipes the stream in, so it's for networks you trust.
     pub curl: Option<String>,
+    /// The tunnel the links go through, closed with the share.
+    tunnel: Option<std::process::Child>,
+    /// Why the links are for this network only, when a public one was
+    /// asked for and couldn't be had.
+    pub local: Option<String>,
+}
+
+impl Drop for Share {
+    fn drop(&mut self) {
+        if let Some(t) = self.tunnel.as_mut() {
+            let _ = t.kill();
+            let _ = t.wait();
+        }
+    }
+}
+
+/// A public address for the port, or why there isn't one, by a Cloudflare
+/// quick tunnel: an HTTPS
+/// link with a certificate browsers trust, reachable from anywhere, going
+/// to deque's own HTTPS here. cloudflared says the address on its errors;
+/// what else it says is read and let go, so it never blocks.
+fn tunnel(port: u16) -> Result<(std::process::Child, String), String> {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("cloudflared")
+        .args(["tunnel", "--no-autoupdate", "--no-tls-verify", "--url", &format!("https://localhost:{port}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "no cloudflared to open one with (brew install cloudflared)".to_string())?;
+    let err = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for l in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+            if let Some(url) = l.split_whitespace().find(|w| w.starts_with("https://") && w.ends_with(".trycloudflare.com")) {
+                let _ = tx.send(url.to_string());
+            }
+        }
+    });
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(url) => {
+            // Not given out till the world can find it: a phone that looks
+            // it up too soon is told it doesn't exist, and believes it for
+            // a minute.
+            let host = url.trim_start_matches("https://");
+            let t = std::time::Instant::now();
+            while !known(host) && t.elapsed() < Duration::from_secs(30) {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Ok((child, url))
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err("cloudflared gave no link in 30 seconds: is this machine online?".into())
+        }
+    }
 }
 
 /// This machine's address on the network: the one a packet out would come
@@ -212,17 +373,47 @@ fn tls(ip: &str) -> Result<Arc<rustls::ServerConfig>, String> {
     Ok(Arc::new(cfg))
 }
 
+/// Whether trycloudflare.com's own nameservers have an address for host
+/// yet. Asked of them straight, by UDP: a resolver asked too soon (this
+/// machine's, or a public one) would remember the no, for everyone.
+fn known(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let mut q = vec![0xde, 0xc0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in host.split('.') {
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
+    }
+    q.extend_from_slice(&[0, 0, 1, 0, 1]);
+    let Ok(s) = UdpSocket::bind("0.0.0.0:0") else { return false };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut a = [0u8; 512];
+    // Its id back, no error, and an answer.
+    ["kevin.ns.cloudflare.com:53", "marjory.ns.cloudflare.com:53"].iter().filter_map(|ns| ns.to_socket_addrs().ok()?.find(|a| a.is_ipv4())).any(|ns| {
+        s.send_to(&q, ns).is_ok() && s.recv(&mut a).is_ok_and(|n| n >= 12 && a[..2] == q[..2] && a[3] & 0xf == 0 && u16::from_be_bytes([a[6], a[7]]) > 0)
+    })
+}
+
 /// Listening on the first free port from 7700; `curl`, to offer the
-/// command to watch in a terminal; `face`, the font to send the page.
-pub fn start(theme: &Theme, curl: bool, face: Option<std::path::PathBuf>) -> Result<Share, String> {
+/// command to watch in a terminal; `face`, the font to send the page;
+/// `public`, the links through a tunnel, for anywhere, not only this
+/// network, if one will open.
+pub fn start(theme: &Theme, curl: bool, face: Option<std::path::PathBuf>, public: bool) -> Result<Share, String> {
     let (l, port) = (7700..7720)
         .find_map(|p| TcpListener::bind(("0.0.0.0", p)).ok().map(|l| (l, p)))
         .ok_or("deque: --share found no free port from 7700 to 7719\n")?;
     let (token, remote) = (token(), token());
     let ip = here();
     let tls = tls(&ip)?;
+    let (tunnel, local) = match public.then(|| tunnel(port)) {
+        Some(Ok((child, base))) => (Some((child, base)), None),
+        Some(Err(why)) => (None, Some(why)),
+        None => (None, None),
+    };
+    let public = tunnel.is_some();
     let hub = Hub(Arc::new(Inner {
         viewers: Mutex::new(vec![]),
+        log: Mutex::new(Log::default()),
+        more: Condvar::new(),
         joined: AtomicBool::new(false),
         open: AtomicUsize::new(0),
         w: AtomicI32::new(80),
@@ -235,6 +426,12 @@ pub fn start(theme: &Theme, curl: bool, face: Option<std::path::PathBuf>) -> Res
         points: Mutex::new(vec![]),
         state: Mutex::new("{}".into()),
         font: face.as_deref().and_then(load),
+        reactions: Mutex::new(vec![]),
+        poll: Mutex::new(None),
+        votes: Mutex::new(Default::default()),
+        voted: AtomicBool::new(false),
+        ip: ip.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        public,
     }));
     let h = hub.clone();
     std::thread::spawn(move || {
@@ -264,19 +461,19 @@ pub fn start(theme: &Theme, curl: bool, face: Option<std::path::PathBuf>) -> Res
         }
     });
     let host = format!("{ip}:{port}");
-    Ok(Share {
-        hub,
-        url: format!("https://{host}/{token}"),
-        remote: format!("https://{host}/{remote}"),
-        curl: curl.then(|| format!("curl -skN https://{host}/{token}")),
-    })
+    // Watching in a terminal is on this network whatever: the tunnel holds
+    // a stream back till it ends.
+    let curl = curl.then(|| format!("curl -skN https://{host}/{token}"));
+    let base = tunnel.as_ref().map_or(format!("https://{host}"), |t| t.1.clone());
+    Ok(Share { hub, url: format!("{base}/{token}"), remote: format!("{base}/{remote}"), curl, tunnel: tunnel.map(|t| t.0), local })
 }
 
 /// One request. `/TOKEN` from a terminal (curl, wget), or `/TOKEN/tty`,
 /// gets the talk as it's drawn; `/TOKEN` from a browser, the page, and
 /// `/TOKEN/app.js` its script; anything else, 404.
 /// A request's head, read from c: up to its blank line, and no more than
-/// 8 KiB of it. None when the other end's gone quiet or sent too much.
+/// 8 KiB of it, as sent. None when the other end's gone quiet or sent too
+/// much.
 fn request(c: &mut impl Read) -> Option<String> {
     let mut head = vec![];
     let mut b = [0u8; 1];
@@ -287,7 +484,7 @@ fn request(c: &mut impl Read) -> Option<String> {
             _ => return None,
         }
     }
-    Some(String::from_utf8_lossy(&head).to_lowercase())
+    Some(String::from_utf8_lossy(&head).into_owned())
 }
 
 /// One connection, TLS or not: requests to watch get their answer, and the
@@ -295,7 +492,8 @@ fn request(c: &mut impl Read) -> Option<String> {
 /// till it goes quiet, and only over TLS.
 fn serve(mut c: impl Read + Write, hub: &Hub, secure: bool) {
     loop {
-        let Some(head) = request(&mut c) else { return };
+        let Some(sent) = request(&mut c) else { return };
+        let head = sent.to_lowercase();
         let mut first = head.split_whitespace();
         let (method, path) = (first.next().unwrap_or(""), first.next().unwrap_or("/"));
         let path = path.split('?').next().unwrap_or("");
@@ -304,21 +502,95 @@ fn serve(mut c: impl Read + Write, hub: &Hub, secure: bool) {
         if same(key, &hub.0.remote) {
             // Control, over plain HTTP, would put the remote's token on the
             // network for anyone to read.
-            if !secure || !control(&mut c, hub, method, rest) {
+            if !secure || !control(&mut c, hub, &head, method, rest) {
                 let _ = c.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 return;
             }
             continue;
         }
+        if rest == "ws" && method == "get" && same(key, &hub.0.token) {
+            return socket(c, hub, &sent);
+        }
         return watch(c, hub, &head, method, key, rest);
     }
 }
 
-/// A request to watch: the page, its script, its font, or the stream.
-fn watch(mut c: impl Read + Write, hub: &Hub, head: &str, method: &str, key: &str, rest: &str) {
-    if method != "get" || !same(key, &hub.0.token.to_lowercase()) {
-        let _ = c.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+/// The talk as it's drawn, over a WebSocket, for the page: a frame for
+/// each piece drawn, sent as it's drawn, which a proxy between (a
+/// tunnel's) passes straight on, as it won't a stream. Nothing the page
+/// sends on it is read; a ping every so often keeps it open through
+/// proxies that close a quiet one.
+fn socket(mut c: impl Read + Write, hub: &Hub, sent: &str) {
+    let Some(key) = sent.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("sec-websocket-key")).map(|(_, v)| v.trim())) else {
+        let _ = c.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
+    };
+    use base64::Engine;
+    let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes());
+    let accept = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
+    let head = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n");
+    // A frame from the server: final, binary (or a ping), unmasked.
+    let frame = |c: &mut dyn Write, op: u8, b: &[u8]| {
+        let mut f = vec![0x80 | op];
+        match b.len() {
+            n if n < 126 => f.push(n as u8),
+            n if n < 65536 => {
+                f.push(126);
+                f.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            n => {
+                f.push(127);
+                f.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
+        f.extend_from_slice(b);
+        c.write_all(&f).and_then(|_| c.flush())
+    };
+    if c.write_all(head.as_bytes()).and_then(|_| frame(&mut c, 2, b"\x1b[0m\x1b[?25l\x1b[2J\x1b[H")).is_err() {
+        return;
+    }
+    let rx = hub.viewer();
+    loop {
+        let sent = match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(b) => frame(&mut c, 2, &b),
+            Err(mpsc::RecvTimeoutError::Timeout) => frame(&mut c, 9, b""),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        if sent.is_err() {
+            return;
+        }
+    }
+}
+
+/// A request to watch: the page, its script, its font, or the stream; or
+/// to react, or vote.
+fn watch(mut c: impl Read + Write, hub: &Hub, head: &str, method: &str, key: &str, rest: &str) {
+    let no = |c: &mut dyn Write| {
+        let _ = c.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    };
+    if !same(key, &hub.0.token.to_lowercase()) {
+        return no(&mut c);
+    }
+    // A page's offer to connect straight: the answer, and a port for it.
+    if method == "post" && rest == "rtc" && hub.0.public {
+        let Some(offer) = body(&mut c, head) else { return no(&mut c) };
+        match crate::rtc::answer(hub, &offer, hub.0.ip, crate::rtc::Side::Watch) {
+            Ok(a) => {
+                reply(&mut c, "application/json", &a, false);
+            }
+            Err(_) => no(&mut c),
+        }
+        return;
+    }
+    if method == "post" {
+        if !answer(hub, rest) {
+            return no(&mut c);
+        }
+        let _ = c.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    if method != "get" {
+        return no(&mut c);
     }
     let terminal = head.lines().any(|l| l.starts_with("user-agent:") && (l.contains("curl") || l.contains("wget")));
     match rest {
@@ -329,6 +601,26 @@ fn watch(mut c: impl Read + Write, hub: &Hub, head: &str, method: &str, key: &st
         }
         "app.js" => {
             reply(&mut c, "text/javascript", &app(hub), false);
+        }
+        // What's been drawn since frame N, for the page: at once if there's
+        // any, or as soon as there is. `new`, or N gone from what's kept, and
+        // the slide's drawn again, whole, to start from.
+        _ if rest.starts_with("frames/") => {
+            let (next, reset, body) = frames(hub, &rest["frames/".len()..]);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nX-Next: {next}\r\n{}Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+                body.len(),
+                if reset { "X-Reset: 1\r\n" } else { "" }
+            );
+            let _ = c.write_all(head.as_bytes()).and_then(|_| c.write_all(&body));
+        }
+        "poll" => {
+            let p = hub.0.poll.lock().unwrap().clone();
+            let json = match p {
+                Some(p) => serde_json::json!({"id": p.id, "question": p.question, "choices": p.choices}),
+                None => serde_json::json!({}),
+            };
+            reply(&mut c, "application/json", &json.to_string(), false);
         }
         "font" if hub.0.font.is_some() => {
             let (bytes, kind) = hub.0.font.as_ref().unwrap();
@@ -344,11 +636,66 @@ fn watch(mut c: impl Read + Write, hub: &Hub, head: &str, method: &str, key: &st
     }
 }
 
+/// Frames from `after` on, waiting a while for one if there are none yet:
+/// the number to ask from next, whether the page's to start again (it
+/// asked for `new`, or for frames no longer kept), and the frames.
+fn frames(hub: &Hub, after: &str) -> (u64, bool, Vec<u8>) {
+    let log = hub.0.log.lock().unwrap();
+    let from = match after.parse::<u64>() {
+        Ok(n) if n >= log.first() && n <= log.next => n,
+        _ => {
+            hub.0.joined.store(true, Ordering::Relaxed);
+            return (log.next, true, vec![]);
+        }
+    };
+    let (log, _) = hub.0.more.wait_timeout_while(log, WAIT, |l| l.next == from).unwrap();
+    // Gone from what's kept while it waited: start again.
+    if from < log.first() {
+        hub.0.joined.store(true, Ordering::Relaxed);
+        return (log.next, true, vec![]);
+    }
+    let skip = (from - log.first()) as usize;
+    (log.next, false, log.frames.iter().skip(skip).flat_map(|f| f.iter().copied()).collect())
+}
+
+/// A watcher's reaction (react/K, K its place in REACTIONS), or vote
+/// (vote/VOTER/K, for the poll open now, VOTER the random name their
+/// browser made): whether it was one.
+fn answer(hub: &Hub, rest: &str) -> bool {
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        ["react", k] => match k.parse::<usize>() {
+            Ok(k) if k < REACTIONS.len() => {
+                let mut q = hub.0.reactions.lock().unwrap();
+                if q.len() < REACTING {
+                    q.push(k);
+                }
+                true
+            }
+            _ => false,
+        },
+        ["vote", who, k] if (8..=32).contains(&who.len()) && who.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            let Some(p) = hub.0.poll.lock().unwrap().clone() else { return false };
+            let Ok(k) = k.parse::<usize>() else { return false };
+            if k >= p.choices.len() {
+                return false;
+            }
+            let mut all = hub.0.votes.lock().unwrap();
+            let v = all.entry(p.id).or_default();
+            if v.len() < VOTERS || v.contains_key(*who) {
+                v.insert(who.to_string(), k);
+                hub.0.voted.store(true, Ordering::Relaxed);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The remote: its page and script, where the talk is, and what it asks
 /// for: a step (POST do/next, back, first, last, replay), or the pointer
 /// (POST point/X/Y or tap/X/Y, fractions of the screen).
-fn control(c: &mut impl Write, hub: &Hub, method: &str, rest: &str) -> bool {
-    let ok = |c: &mut dyn Write| c.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").is_ok();
+fn control(c: &mut (impl Read + Write), hub: &Hub, head: &str, method: &str, rest: &str) -> bool {
     let parts: Vec<&str> = rest.split('/').collect();
     match (method, parts.as_slice()) {
         ("get", [""]) => reply(c, "text/html", &remote_page(&hub.0.remote), true),
@@ -357,32 +704,55 @@ fn control(c: &mut impl Write, hub: &Hub, method: &str, rest: &str) -> bool {
             let s = hub.0.state.lock().unwrap().clone();
             reply(c, "application/json", &s, true)
         }
-        ("post", ["do", what]) if ["next", "back", "first", "last", "replay"].contains(what) => {
+        // The phone asking to connect straight, to point with no wait.
+        ("post", ["rtc"]) => match body(c, head).filter(|_| hub.0.public) {
+            Some(offer) => match crate::rtc::answer(hub, &offer, hub.0.ip, crate::rtc::Side::Remote) {
+                Ok(a) => reply(c, "application/json", &a, true),
+                Err(_) => false,
+            },
+            None => false,
+        },
+        ("post", _) => act(hub, rest) && c.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").is_ok(),
+        _ => false,
+    }
+}
+
+/// A request's body, as much as its head says, 64 KiB at most.
+fn body(c: &mut impl Read, head: &str) -> Option<String> {
+    let len = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|n| n.trim().parse::<usize>().ok()).filter(|&n| n <= 65536)?;
+    let mut b = vec![0; len];
+    c.read_exact(&mut b).ok()?;
+    Some(String::from_utf8_lossy(&b).into_owned())
+}
+
+/// What the remote asks for, however it came: a step (do/next, back,
+/// first, last, replay), or the pointer (point/X/Y or tap/X/Y, fractions
+/// of the screen, or lift). Whether it was one.
+pub fn act(hub: &Hub, what: &str) -> bool {
+    let parts: Vec<&str> = what.split('/').collect();
+    let point = |p: (f64, f64, Touch)| {
+        let mut q = hub.0.points.lock().unwrap();
+        if q.len() >= 64 {
+            q.remove(0);
+        }
+        q.push(p);
+    };
+    match parts.as_slice() {
+        ["do", what] if ["next", "back", "first", "last", "replay"].contains(what) => {
             let mut q = hub.0.cmds.lock().unwrap();
             if q.len() < 16 {
                 q.push(what.to_string());
             }
-            drop(q);
-            ok(c)
+            true
         }
-        ("post", ["lift"]) => {
-            let mut q = hub.0.points.lock().unwrap();
-            if q.len() >= 64 {
-                q.remove(0);
-            }
-            q.push((0.0, 0.0, Touch::Lift));
-            drop(q);
-            ok(c)
+        ["lift"] => {
+            point((0.0, 0.0, Touch::Lift));
+            true
         }
-        ("post", [kind @ ("point" | "tap"), x, y]) => match (x.parse::<f64>(), y.parse::<f64>()) {
+        [kind @ ("point" | "tap"), x, y] => match (x.parse::<f64>(), y.parse::<f64>()) {
             (Ok(x), Ok(y)) if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) => {
-                let mut q = hub.0.points.lock().unwrap();
-                if q.len() >= 64 {
-                    q.remove(0);
-                }
-                q.push((x, y, if *kind == "tap" { Touch::Tap } else { Touch::Point }));
-                drop(q);
-                ok(c)
+                point((x, y, if *kind == "tap" { Touch::Tap } else { Touch::Point }));
+                true
             }
             _ => false,
         },
@@ -442,7 +812,28 @@ button:active{filter:brightness(1.3)}
 /// asks for is relative to that.
 const REMOTE_JS: &str = r##"const base = location.pathname.replace(/\/$/, "") + "/";
 const $ = id => document.getElementById(id);
-const post = (p, keep) => fetch(base + p, {method: "POST", keepalive: !!keep}).catch(() => {});
+// Straight to the presenter's machine, where the phone can reach it (the
+// same network, through a public link): what it asks for goes at once,
+// with no wait for an answer. Elsewhere, or till then, a request each.
+let dc = null;
+const fast = () => dc && dc.readyState === "open";
+(async () => {
+  if (!window.RTCPeerConnection) return;
+  try {
+    const pc = new RTCPeerConnection();
+    const ch = pc.createDataChannel("remote");
+    ch.onopen = () => { dc = ch; };
+    ch.onclose = () => { dc = null; pc.close(); };
+    await pc.setLocalDescription(await pc.createOffer());
+    const r = await fetch(base + "rtc", {method: "POST", body: JSON.stringify(pc.localDescription)});
+    if (!r.ok) throw 0;
+    await pc.setRemoteDescription(await r.json());
+  } catch (e) {}
+})();
+const post = (p, keep) => {
+  if (fast()) { dc.send(p); return Promise.resolve(); }
+  return fetch(base + p, {method: "POST", keepalive: !!keep}).catch(() => {});
+};
 const clamp = v => Math.min(1, Math.max(0, v));
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
@@ -548,7 +939,9 @@ let pos = [0.5, 0.5], sending = false, lastSent = 0;
 let holding = false, heldAt = 0, lastUp = 0, travelled = 0, ready = false;
 function point(force) {
   const now = Date.now();
-  if (!force && (sending || now - lastSent < 33)) return;
+  // A request at a time, each waiting on the last; straight, as often as
+  // the screen's drawn.
+  if (!force && (fast() ? now - lastSent < 16 : sending || now - lastSent < 33)) return;
   lastSent = now;
   sending = true;
   post(`point/${pos[0].toFixed(4)}/${pos[1].toFixed(4)}`).finally(() => (sending = false));
@@ -697,14 +1090,11 @@ fn reply(c: &mut impl Write, kind: &str, body: &str, keep: bool) -> bool {
 
 /// The talk as it's drawn, till the watcher goes, or falls too far behind.
 fn stream(mut c: impl Write, hub: &Hub) {
-    let (tx, rx) = mpsc::sync_channel(BEHIND);
     let ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
     if c.write_all(ok.as_bytes()).and_then(|_| c.write_all(b"\x1b[0m\x1b[?25l\x1b[2J\x1b[H")).is_err() {
         return;
     }
-    hub.0.viewers.lock().unwrap().push(tx);
-    hub.0.joined.store(true, Ordering::Relaxed);
-    for b in rx {
+    for b in hub.viewer() {
         if c.write_all(&b).and_then(|_| c.flush()).is_err() {
             return;
         }
@@ -809,7 +1199,8 @@ fn hex(c: Rgb) -> String {
 /// A terminal in the page, xterm.js checked against its hash, in the
 /// presenter's font when it's been sent.
 fn page(hub: &Hub) -> String {
-    let bg = hex(hub.0.theme.lock().unwrap().bg);
+    let t = hub.0.theme.lock().unwrap().clone();
+    let (bg, fg, accent, muted) = (hex(t.bg), hex(t.fg), hex(t.accent), hex(t.muted));
     let token = &hub.0.token;
     let face = match hub.0.font {
         Some(_) => format!(r#"@font-face{{font-family:"deque";src:url("/{}/font")}}"#, hub.0.token),
@@ -818,16 +1209,29 @@ fn page(hub: &Hub) -> String {
     format!(
         r##"<!doctype html>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>deque · live</title>
 <link rel="stylesheet" href="{XTERM}/css/xterm.css" integrity="{XTERM_CSS}" crossorigin="anonymous">
 <style>
 html,body{{margin:0;height:100%;background:{bg};overflow:hidden}}
-body{{display:flex;align-items:center;justify-content:center}}
+body{{display:flex;flex-direction:column;font:16px ui-monospace,Menlo,monospace;color:{fg}}}
+#stage{{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}}
 #t{{transform-origin:center}}
+#poll{{display:none;flex-direction:column;gap:8px;padding:10px 12px 0;max-width:640px;width:100%;margin:0 auto;box-sizing:border-box}}
+#poll.on{{display:flex}}
+#poll b{{color:{accent}}}
+#poll button{{text-align:left;font:inherit;padding:12px 14px;border-radius:10px;border:1px solid {muted};background:none;color:inherit;cursor:pointer}}
+#poll button.mine{{border-color:{accent};background:{accent};color:{bg};font-weight:bold}}
+#react{{display:flex;justify-content:center;gap:6px;padding:10px 8px calc(10px + env(safe-area-inset-bottom))}}
+#react button{{font-size:26px;line-height:1;padding:8px 10px;border-radius:12px;border:0;background:none;cursor:pointer;touch-action:manipulation;transition:transform .08s}}
+#react button:active{{transform:scale(1.35)}}
+.pop{{position:fixed;font-size:30px;pointer-events:none;animation:up 1.2s ease-out forwards}}
+@keyframes up{{to{{transform:translateY(-120px);opacity:0}}}}
 {face}
 </style>
-<div id="t"></div>
+<div id="stage"><div id="t"></div></div>
+<div id="poll"></div>
+<div id="react"></div>
 <script src="{XTERM}/lib/xterm.js" integrity="{XTERM_JS}" crossorigin="anonymous"></script>
 <script src="/{token}/app.js"></script>
 "##
@@ -841,6 +1245,8 @@ fn app(hub: &Hub) -> String {
     let t = hub.0.theme.lock().unwrap().clone();
     let (bg, fg, token) = (hex(t.bg), hex(t.fg), &hub.0.token);
     let font = hub.0.font.is_some();
+    let public = hub.0.public;
+    let reactions = serde_json::to_string(&REACTIONS.map(String::from)).unwrap();
     format!(
         r##"(async () => {{
 // The presenter's font, loaded before the terminal measures its cells.
@@ -856,25 +1262,123 @@ term.parser.registerOscHandler(7741, d => {{
   return true;
 }});
 function fit() {{
-  const e = document.querySelector("#t .xterm-screen");
+  const e = document.querySelector("#t .xterm-screen"), stage = document.getElementById("stage");
   if (!e) return;
-  const k = Math.min(innerWidth / e.offsetWidth, innerHeight / e.offsetHeight) * 0.98;
+  const k = Math.min(stage.clientWidth / e.offsetWidth, stage.clientHeight / e.offsetHeight) * 0.98;
   document.getElementById("t").style.transform = "scale(" + k + ")";
 }}
 addEventListener("resize", fit);
 setTimeout(fit, 100);
-(async () => {{
-  for (;;) {{
-    try {{
-      const r = await fetch("/{token}/tty", {{cache: "no-store"}});
-      const read = r.body.getReader();
-      for (;;) {{
-        const {{value, done}} = await read.read();
-        if (done) break;
-        term.write(value);
+
+// Reacting: a tap sends which, and it pops up here too.
+const post = p => fetch("/{token}/" + p, {{method: "POST"}}).catch(() => {{}});
+{reactions}.forEach((r, k) => {{
+  const b = document.createElement("button");
+  b.textContent = r;
+  b.onclick = () => {{
+    post("react/" + k);
+    const box = b.getBoundingClientRect(), p = document.createElement("span");
+    p.className = "pop";
+    p.textContent = r;
+    p.style.left = box.left + box.width / 2 - 15 + (Math.random() - 0.5) * 20 + "px";
+    p.style.top = box.top - 10 + "px";
+    document.body.appendChild(p);
+    setTimeout(() => p.remove(), 1300);
+  }};
+  document.getElementById("react").appendChild(b);
+}});
+
+// Voting: this browser's own random name, so voting again changes the
+// vote rather than adding one; the choice it made, for each poll.
+const who = (() => {{
+  try {{
+    let w = localStorage.getItem("deque-voter");
+    if (!w) {{ w = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, "0")).join(""); localStorage.setItem("deque-voter", w); }}
+    return w;
+  }} catch (e) {{
+    return [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, "0")).join("");
+  }}
+}})();
+const mine = {{}};
+let shown = "";
+async function poll() {{
+  try {{
+    const p = await (await fetch("/{token}/poll", {{cache: "no-store"}})).json();
+    const box = document.getElementById("poll");
+    const key = p.id ? p.id + "\n" + mine[p.id] : "";
+    if (key !== shown) {{
+      shown = key;
+      box.replaceChildren();
+      box.classList.toggle("on", !!p.id);
+      if (p.id) {{
+        const q = document.createElement("b");
+        q.textContent = p.question;
+        box.appendChild(q);
+        p.choices.forEach((c, k) => {{
+          const b = document.createElement("button");
+          b.textContent = c;
+          if (mine[p.id] === k) b.className = "mine";
+          b.onclick = () => {{ mine[p.id] = k; post("vote/" + who + "/" + k); shown = ""; poll(); }};
+          box.appendChild(b);
+        }});
       }}
-    }} catch (e) {{}}
-    await new Promise(r => setTimeout(r, 1000));
+      setTimeout(fit, 0);
+    }}
+  }} catch (e) {{}}
+}}
+setInterval(poll, 1500);
+poll();
+// What's drawn, as it's drawn, over a WebSocket; where that can't be
+// had, asked for again and again, each answer what's been drawn since the
+// last, as soon as there's any.
+// Through a tunnel, and able to reach the presenter's machine: straight
+// from it, and the rest waits while that's open.
+let direct = false, ws = null;
+const pause = ms => new Promise(r => setTimeout(r, ms));
+const socket = () => new Promise(done => {{
+  let opened = false;
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/{token}/ws");
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {{ opened = true; }};
+  ws.onmessage = e => {{ if (!direct) term.write(new Uint8Array(e.data)); }};
+  ws.onclose = () => done(opened);
+}});
+async function straight() {{
+  try {{
+    const pc = new RTCPeerConnection();
+    const dc = pc.createDataChannel("talk");
+    dc.binaryType = "arraybuffer";
+    dc.onmessage = e => term.write(new Uint8Array(e.data));
+    dc.onopen = () => {{ direct = true; if (ws) ws.close(); }};
+    dc.onclose = () => {{ direct = false; pc.close(); }};
+    await pc.setLocalDescription(await pc.createOffer());
+    const r = await fetch("/{token}/rtc", {{method: "POST", body: JSON.stringify(pc.localDescription)}});
+    if (!r.ok) throw 0;
+    await pc.setRemoteDescription(await r.json());
+  }} catch (e) {{}}
+}}
+if ({public} && window.RTCPeerConnection) straight();
+(async () => {{
+  // Open again when it closes, having opened; if it never does, ask.
+  for (;;) {{
+    if (direct) {{ await pause(500); continue; }}
+    if (await socket()) {{ await pause(1000); continue; }}
+    if (!direct) break;
+  }}
+  let next = "new";
+  for (;;) {{
+    if (direct) {{ next = "new"; await pause(500); continue; }}
+    try {{
+      const r = await fetch("/{token}/frames/" + next, {{cache: "no-store"}});
+      if (!r.ok) throw 0;
+      if (r.headers.get("x-reset")) term.write("\x1b[0m\x1b[?25l\x1b[2J\x1b[H");
+      next = r.headers.get("x-next");
+      const b = new Uint8Array(await r.arrayBuffer());
+      if (b.length) term.write(b);
+    }} catch (e) {{
+      next = "new";
+      await new Promise(r => setTimeout(r, 1000));
+    }}
   }}
 }})();
 }})();
@@ -905,7 +1409,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let face = dir.join("Mono-Regular.otf");
         std::fs::write(&face, b"OTTO font bytes").unwrap();
-        let share = start(&Theme::default(), false, Some(face)).unwrap();
+        let share = start(&Theme::default(), false, Some(face), false).unwrap();
         let (port, token) = {
             let rest = share.url.rsplit("//").next().unwrap();
             let (host, token) = rest.split_once('/').unwrap();
@@ -996,7 +1500,7 @@ mod tests {
             .map(|r| {
                 c.write_all(r.as_bytes()).unwrap();
                 // The head, then as much body as it says.
-                let head = request(&mut c).unwrap_or_default();
+                let head = request(&mut c).unwrap_or_default().to_lowercase();
                 let len = head.lines().find_map(|l| l.strip_prefix("content-length: ")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
                 let mut body = vec![0u8; len];
                 c.read_exact(&mut body).unwrap();
@@ -1007,7 +1511,7 @@ mod tests {
 
     #[test]
     fn only_the_remote_drives() {
-        let share = start(&Theme::default(), false, None).unwrap();
+        let share = start(&Theme::default(), false, None, false).unwrap();
         assert!(share.url.starts_with("https://") && share.remote.starts_with("https://"));
         let port = share.url.rsplit(':').next().unwrap().split('/').next().unwrap().to_string();
         let (watch, remote) = (share.url.rsplit('/').next().unwrap(), share.remote.rsplit('/').next().unwrap());
@@ -1041,8 +1545,69 @@ mod tests {
     }
 
     #[test]
+    fn watchers_react_and_vote_by_number_only() {
+        let share = start(&Theme::default(), false, None, false).unwrap();
+        let port = share.url.rsplit(':').next().unwrap().split('/').next().unwrap().to_string();
+        let (watch, remote) = (share.url.rsplit('/').next().unwrap(), share.remote.rsplit('/').next().unwrap());
+        let ok = |p: &str| post(&port, &format!("/{watch}/{p}")).starts_with("HTTP/1.1 204");
+        assert!(ok("react/0") && ok("react/5"));
+        assert!(!ok("react/6") && !ok("react/x") && !ok("say/hello"));
+        assert!(!post(&port, "/nope/react/0").starts_with("HTTP/1.1 204"));
+        assert_eq!(share.hub.reactions(), [0, 5]);
+        // No poll open: nothing to vote on.
+        assert!(!ok("vote/0123456789abcdef/0"));
+        let p = Poll { id: "q".into(), question: "which?".into(), choices: vec!["a".into(), "b".into()] };
+        share.hub.poll(Some(p.clone()));
+        let got = all(get(&port, &format!("/{watch}/poll"), "Mozilla"));
+        assert!(got.ends_with(r#"{"choices":["a","b"],"id":"q","question":"which?"}"#), "{got}");
+        assert!(ok("vote/0123456789abcdef/0") && ok("vote/fedcba9876543210/1"));
+        // A second vote replaces the first; a voter's name is hex, a choice
+        // one there is.
+        assert!(ok("vote/0123456789abcdef/1"));
+        assert!(!ok("vote/not-hex-at-all!/0") && !ok("vote/0123456789abcdef/2") && !ok("vote/abc/0"));
+        assert!(share.hub.voted() && !share.hub.voted());
+        assert_eq!(share.hub.tally(&p), [0, 2]);
+        // The remote's link isn't the watchers'.
+        assert!(!post(&port, &format!("/{remote}/react/0")).starts_with("HTTP/1.1 204"));
+        // No asking to connect straight but through a tunnel.
+        let offer = format!("POST /{watch}/rtc HTTP/1.1\r\nContent-Length: 2\r\n\r\n{{}}");
+        let mut c = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        c.write_all(offer.as_bytes()).unwrap();
+        assert!(all(c).starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn pages_ask_for_what_they_have_not_had() {
+        let share = start(&Theme::default(), false, None, false).unwrap();
+        let port = share.url.rsplit(':').next().unwrap().split('/').next().unwrap().to_string();
+        let watch = share.url.rsplit('/').next().unwrap().to_string();
+        let ask = |after: &str| {
+            let r = all(get(&port, &format!("/{watch}/frames/{after}"), "Mozilla"));
+            let next = r.lines().find_map(|l| l.strip_prefix("X-Next: ")).unwrap().to_string();
+            (next, r.contains("X-Reset: 1"), r.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+        };
+        // New: start from here, the slide drawn again for it.
+        assert_eq!(ask("new"), ("0".into(), true, String::new()));
+        assert!(share.hub.joined());
+        share.hub.send(b"one", 80, 24);
+        share.hub.send(b"two", 80, 24);
+        let (next, reset, got) = ask("0");
+        assert!(!reset && got.ends_with("onetwo") && next == "2", "{got:?}");
+        assert_eq!(ask("1").2, "two");
+        // Nothing new yet: it waits for it.
+        let h = share.hub.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            h.send(b"three", 80, 24);
+        });
+        assert_eq!(ask("2"), ("3".into(), false, "three".into()));
+        // Asked for what's no longer kept, or never was: start again.
+        assert!(ask("99").1);
+    }
+
+    #[test]
     fn a_watcher_too_far_behind_is_let_go() {
-        let share = start(&Theme::default(), false, None).unwrap();
+        let share = start(&Theme::default(), false, None, false).unwrap();
         let (tx, _rx) = mpsc::sync_channel(BEHIND);
         share.hub.0.viewers.lock().unwrap().push(tx);
         for _ in 0..=BEHIND {

@@ -273,6 +273,17 @@ file -> parse -> slides -> screen
 {muted}`a -> b` lines in a graph block, laid out for you{/}
 
 ---
+## ask the room
+# TABS?
+```poll
+tabs
+spaces
+whatever the formatter says
+```
+
+{muted}with --share, watchers vote from the page, and react with emoji{/}
+
+---
 ## presenting
 # NOTES
 `// a line like this` in a slide is a speaker note

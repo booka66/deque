@@ -70,6 +70,22 @@ impl Bar {
     }
 }
 
+/// A ```poll block: its choices, where they start in the body, and a name
+/// for it that stays the same while its choices do, to keep its votes by.
+#[derive(Clone, Debug)]
+pub struct Poll {
+    pub id: String,
+    pub choices: Vec<String>,
+    pub at: usize,
+}
+
+/// A poll's bar, as wide as a chart's, and its count, for `votes` votes of
+/// `most` at most.
+pub fn poll_bar(lead: Line, votes: usize, most: usize, muted: Rgb) -> Bar {
+    let tail = markup::plain(&format!(" {votes:>4}"), Style::fg(muted));
+    Bar { lead, frac: votes as f64 / most.max(1) as f64, width: 32, tail }
+}
+
 /// A ```lang focus: step: on it, the block's lines but these dim.
 #[derive(Clone, Debug)]
 pub struct Focus {
@@ -142,6 +158,8 @@ pub struct Slide {
     pub time: Option<u32>,
     /// Its speaker notes, the `//` lines.
     pub notes: Vec<String>,
+    /// Its ```poll block, voted on by those watching.
+    pub poll: Option<Poll>,
 }
 
 impl Slide {
@@ -160,6 +178,23 @@ impl Slide {
             (Some(t), ..) => t,
             _ => "(empty)".into(),
         }
+    }
+
+    /// Its poll's bars, for these votes for each choice; how full they
+    /// were before.
+    pub fn tally(&mut self, votes: &[usize], accent: Rgb, muted: Rgb) -> Vec<f64> {
+        let Some(p) = &self.poll else { return vec![] };
+        let most = votes.iter().copied().max().unwrap_or(0);
+        let mut before = vec![];
+        for k in 0..p.choices.len() {
+            let b = &mut self.body[p.at + k];
+            before.push(b.bar.as_ref().map_or(0.0, |x| x.frac));
+            let lead = b.bar.as_ref().map(|x| x.lead.clone()).unwrap_or_default();
+            let bar = poll_bar(lead, votes.get(k).copied().unwrap_or(0), most, muted);
+            b.line = bar.line(1.0, Style::fg(accent));
+            b.bar = Some(bar);
+        }
+        before
     }
 
     pub fn steps(&self) -> usize {
@@ -560,6 +595,8 @@ struct Block {
     bars: Vec<Option<Bar>>,
     /// For a ```lang focus: block, the lines lit on each step, from 0.
     focus: Vec<Vec<usize>>,
+    /// For a ```poll block, its choices.
+    poll: Option<Vec<String>>,
 }
 
 /// A ``` block being read: what its opening line said, where its lines
@@ -833,6 +870,14 @@ fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
             step += 1;
             s.focus.push(Focus { step, block: at..s.body.len(), lines: g.into_iter().map(|k| at + k).collect() });
         }
+        if let Some(choices) = b.poll {
+            if s.poll.is_some() {
+                p.n = s.line;
+                p.err(0, 3, "a second poll; a slide has one");
+            }
+            let id = format!("{}\n{}", s.title(), choices.join("\n"));
+            s.poll = Some(Poll { id, choices, at });
+        }
         // Its output comes in on a step of its own, after the block.
         if let Some(argv) = b.run {
             step += 1;
@@ -855,10 +900,10 @@ fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
 fn open(p: &mut P, l: &str, info: &str, i: usize, ran: bool) -> Option<Open> {
     let mut words = info.split_whitespace().peekable();
     let lang = words.next()?.to_string();
-    let chart = lang == "chart";
+    let chart = lang == "chart" || lang == "poll";
     if !chart && !code::known(&lang) {
         let at = l.find(&lang).unwrap_or(0);
-        p.err(at, at + lang.len(), format!("no language \"{lang}\"; {}try ts, tsx, js, rs, py, go, sh, json, yaml, sql, diff, or chart", spec::near(&lang, code::languages().iter().flat_map(|(n, full)| [n.as_str(), full.as_str()]).chain(["chart"]))));
+        p.err(at, at + lang.len(), format!("no language \"{lang}\"; {}try ts, tsx, js, rs, py, go, sh, json, yaml, sql, diff, chart or poll", spec::near(&lang, code::languages().iter().flat_map(|(n, full)| [n.as_str(), full.as_str()]).chain(["chart", "poll"]))));
     }
     let mut o = Open { lang, run: None, file: None, focus: vec![], at: i + 1, src: vec![] };
     while let Some(w) = words.next() {
@@ -932,6 +977,29 @@ fn close(p: &mut P, s: &mut Slide, b: &mut Block, o: Open, opened: usize) {
     if o.file.is_some() && o.src.iter().any(|l| !l.trim().is_empty()) {
         p.n = opened;
         p.err(0, 3, "a block from a file has no lines of its own");
+    }
+    if o.lang == "poll" {
+        let choices: Vec<(usize, String)> = o.src.iter().enumerate().filter(|(_, l)| !l.trim().is_empty()).map(|(k, l)| (o.at + k, l.trim().to_string())).collect();
+        if choices.len() < 2 {
+            p.n = opened;
+            p.err(0, 3, "a poll has two choices or more, a line each");
+        }
+        let leads: Vec<Line> = choices
+            .iter()
+            .map(|(n, c)| {
+                p.n = *n;
+                p.markup(c, 0)
+            })
+            .collect();
+        let lw = leads.iter().map(|l| markup::width(l)).max().unwrap_or(0);
+        b.poll = Some(leads.iter().map(|l| markup::text(l).trim().to_string()).collect());
+        for ((n, _), mut lead) in choices.iter().zip(leads) {
+            lead.extend(markup::plain(&" ".repeat((lw + 2 - markup::width(&lead)) as usize), Style::default()));
+            let bar = poll_bar(lead, 0, 0, p.theme.muted);
+            b.lines.push((false, bar.line(1.0, Style::fg(p.theme.accent)), *n));
+            b.bars.push(Some(bar));
+        }
+        return;
     }
     if o.lang == "chart" {
         let got: Vec<(usize, (String, String, f64))> = o
@@ -1326,6 +1394,24 @@ mod tests {
         let rows: Vec<String> = t.slides[0].body.iter().map(|b| markup::text(&b.line)).collect();
         // Header, a rule, and the numbers to the right.
         assert_eq!(rows, ["a    n ", "───────", "x     7", "yy   10"]);
+    }
+
+    #[test]
+    fn polls_are_bars_of_votes() {
+        let (mut t, d) = parse("---\n# WHICH\n```poll\ntabs\n**spaces**\n```\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        let s = &mut t.slides[0];
+        let p = s.poll.clone().unwrap();
+        assert_eq!((p.choices, p.at, p.id.as_str()), (vec!["tabs".to_string(), "spaces".to_string()], 0, "WHICH\ntabs\nspaces"));
+        let text = |s: &Slide| s.body.iter().map(|b| markup::text(&b.line)).collect::<Vec<_>>();
+        let before = text(s);
+        s.tally(&[1, 4], Rgb(1, 1, 1), Rgb(2, 2, 2));
+        let after = text(s);
+        assert!(after[0].ends_with("    1") && after[1].ends_with("    4") && after[1].contains(&"█".repeat(32)));
+        // Just as wide, so it stays put.
+        assert_eq!(before.iter().map(|l| l.chars().count()).collect::<Vec<_>>(), after.iter().map(|l| l.chars().count()).collect::<Vec<_>>());
+        let (_, d) = parse("---\n```poll\nonly\n```\n", Path::new("."), false);
+        assert!(d.iter().any(|d| d.msg.contains("two choices")));
     }
 
     #[test]

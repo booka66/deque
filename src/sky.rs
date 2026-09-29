@@ -93,7 +93,24 @@ pub struct Sky {
     pub trail: Vec<(f64, f64, f64)>,
     /// With boids: hawks, bigger and faster, after the nearest bird.
     hawks: Vec<Mote>,
+    /// Watchers' reactions, rising up the right of the screen.
+    pub floats: Vec<Float>,
 }
+
+/// A reaction on its way up: what, from which column, when it came, its
+/// own sway, and how fast it rises, in rows a second.
+#[derive(Clone, Copy)]
+pub struct Float {
+    ch: char,
+    x: f64,
+    born: f64,
+    ph: f64,
+    rise: f64,
+}
+
+/// How long a reaction's on the screen, and how many can be at once.
+const FLOAT_LIFE: f64 = 3.5;
+const FLOATS: usize = 24;
 
 pub const QUAD: [char; 16] = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█'];
 
@@ -182,6 +199,7 @@ impl Sky {
             ripples: vec![],
             trail: vec![],
             hawks: vec![],
+            floats: vec![],
         };
         s.fill();
         s
@@ -264,11 +282,33 @@ impl Sky {
         m
     }
 
+    /// A reaction, rising from the bottom right; past as many as there's
+    /// room for, it's let go.
+    pub fn float(&mut self, ch: char) {
+        let cols = (self.pw / 2) as f64;
+        if self.floats.len() >= FLOATS || cols < 20.0 {
+            return;
+        }
+        let (x, ph, r) = (cols - 5.0 - self.rand() * 12.0, self.rand() * 6.3, self.rand());
+        let rise = (self.ph / 2) as f64 * (0.45 + 0.2 * r) / FLOAT_LIFE;
+        self.floats.push(Float { ch, x, born: self.t, ph, rise });
+    }
+
+    /// Where a reaction is at time t, its row and column from 0, or None
+    /// when it's gone.
+    fn at(&self, f: &Float) -> Option<(usize, usize)> {
+        let age = self.t - f.born;
+        let (rows, cols) = ((self.ph / 2) as f64, (self.pw / 2) as f64);
+        let (y, x) = ((rows - 2.0 - age * f.rise).round(), (f.x + 1.5 * (age * 2.5 + f.ph).sin()).round());
+        (age < FLOAT_LIFE && y >= 0.0 && x >= 0.0 && x + 1.0 < cols).then_some((y as usize, x as usize))
+    }
+
     /// On to time t, in seconds: everything moved, then the pixels drawn
     /// again, the glow from the headline's letters among `front`.
     pub fn frame(&mut self, t: f64, theme: &Theme, front: &[Option<Cell>], w: usize) {
         let dt = (t - self.t).clamp(0.0, 0.1);
         self.t = t;
+        self.floats.retain(|f| t - f.born < FLOAT_LIFE);
         // Where text is first, for what steers around it.
         self.hush(front, w);
         self.step(dt, t);
@@ -770,6 +810,18 @@ impl Sky {
         if 2 * r + 1 >= self.ph || 2 * c + 1 >= self.pw {
             return front.unwrap_or(Cell { ch: ' ', st: Style::default() });
         }
+        // A reaction, over whatever's there: its two cells, the right one
+        // drawn with the left.
+        for f in &self.floats {
+            match self.at(f) {
+                Some((fr, fc)) if fr == r && (fc == c || fc + 1 == c) => {
+                    let bg = mean(&[self.field[i(0, 0)], self.field[i(0, 1)], self.field[i(1, 0)], self.field[i(1, 1)]]);
+                    let ch = if fc == c { f.ch } else { '\0' };
+                    return Cell { ch, st: Style { bg: Some(bg), ..Style::default() } };
+                }
+                _ => {}
+            }
+        }
         match front {
             Some(f) => {
                 let bg = f.st.bg.unwrap_or_else(|| mean(&[self.field[i(0, 0)], self.field[i(0, 1)], self.field[i(1, 0)], self.field[i(1, 1)]]));
@@ -815,6 +867,23 @@ mod tests {
         assert_eq!(quad([d, d, l, l]).ch, '▄');
         let c = quad([l, d, d, l]);
         assert_eq!((c.ch, c.st.fg, c.st.bg), ('▚', Some(l), Some(d)));
+    }
+
+    #[test]
+    fn reactions_rise_and_go() {
+        let th = Theme::default();
+        let mut s = Sky::new(Kind::None, false, 60, 20, 3);
+        let front = vec![None; 60 * 20];
+        s.float('👏');
+        s.frame(0.5, &th, &front, 60);
+        let at = |s: &Sky| (0..20).flat_map(|r| (0..60).map(move |c| (r, c))).find(|&(r, c)| s.look(r, c, None).ch == '👏');
+        let (r0, c0) = at(&s).unwrap();
+        // Its right half goes with it.
+        assert_eq!(s.look(r0, c0 + 1, None).ch, '\0');
+        s.frame(2.0, &th, &front, 60);
+        assert!(at(&s).unwrap().0 < r0);
+        s.frame(4.0, &th, &front, 60);
+        assert!(at(&s).is_none() && s.floats.is_empty());
     }
 
     #[test]

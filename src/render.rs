@@ -254,6 +254,28 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
     }
 }
 
+/// Slide n's poll bars moving from how full they were, `before`, to how
+/// full they are now.
+pub fn tallied(s: &mut Screen, talk: &Talk, n: usize, before: &[f64]) {
+    let slide = &talk.slides[n];
+    let Some(p) = &slide.poll else { return };
+    let (.., brow) = layout(s, slide);
+    let frames = if talk.calm { 1 } else { 10 };
+    for f in 1..=frames {
+        let e = crate::screen::ease(f, frames);
+        for k in 0..p.choices.len() {
+            let i = p.at + k;
+            let Some(bar) = &slide.body[i].bar else { continue };
+            let was = before.get(k).copied().unwrap_or(bar.frac);
+            let b = crate::talk::Bar { frac: was + (bar.frac - was) * e, ..bar.clone() };
+            s.center(brow + i as i32, &b.line(1.0, s.accent()));
+        }
+        if f < frames {
+            s.tick(0.02);
+        }
+    }
+}
+
 /// A drawn slide: its drawing centered, its label at the top of it, and its
 /// groups up to the step shown, in order, so a later clear takes away what
 /// an earlier step drew.
@@ -630,9 +652,12 @@ pub struct Card<'a> {
     pub table: bool,
 }
 
-pub fn watch(s: &mut Screen, talk: &Talk, n: usize, url: &str, cmd: Option<&str>) {
+/// `local`: why the link only works on this network, when it was meant
+/// to work anywhere.
+pub fn watch(s: &mut Screen, talk: &Talk, n: usize, url: &str, cmd: Option<&str>, local: Option<&str>) {
     let mut extra = vec![("open  ", url)];
     extra.extend(cmd.map(|c| ("or run  ", c)));
+    extra.extend(local.map(|w| ("this network only: ", w)));
     show_card(s, talk, n, Card { title: "can't see the screen? watch along", url, extra, copy: true, table: false });
 }
 

@@ -54,6 +54,8 @@ pub struct Screen {
     /// Whether something put fell off the screen, across and down: the
     /// window's too small for it.
     pub clip: (bool, bool),
+    /// calm: watchers' reactions don't rise up the screen.
+    pub calm: bool,
 }
 
 #[derive(Default)]
@@ -120,6 +122,7 @@ impl Screen {
             redraw: false,
             tap: None,
             clip: (false, false),
+            calm: false,
         };
         s.size();
         s
@@ -156,7 +159,7 @@ impl Screen {
     /// The slide's sky. One the same as the last is kept, so it goes on
     /// moving from slide to slide.
     pub fn backdrop(&mut self, kind: Kind, glow: bool) {
-        if kind == Kind::None && !glow && !self.pointing() {
+        if kind == Kind::None && !glow && !self.pointing() && !self.reacting() {
             self.sky = None;
             return;
         }
@@ -164,14 +167,31 @@ impl Screen {
             s.glow = glow;
             return;
         }
-        let (pointer, ripples, trail) = self.sky.take().map(|s| (s.pointer, s.ripples, s.trail)).unwrap_or_default();
+        let (pointer, ripples, trail, floats) = self.sky.take().map(|s| (s.pointer, s.ripples, s.trail, s.floats)).unwrap_or_default();
         self.make_sky(kind, glow);
         let s = self.sky.as_mut().unwrap();
-        (s.pointer, s.ripples, s.trail) = (pointer, ripples, trail);
+        (s.pointer, s.ripples, s.trail, s.floats) = (pointer, ripples, trail, floats);
     }
 
     fn pointing(&self) -> bool {
         self.now() - self.pointed < 3.0
+    }
+
+    /// Whether reactions are rising.
+    fn reacting(&self) -> bool {
+        self.sky.as_ref().is_some_and(|s| !s.floats.is_empty())
+    }
+
+    /// A watcher's reaction, k of share::REACTIONS: up the screen it goes.
+    pub fn react(&mut self, k: usize) {
+        if self.calm {
+            return;
+        }
+        if self.sky.is_none() {
+            self.keep();
+            self.redraw = true;
+        }
+        self.sky.as_mut().unwrap().float(crate::share::REACTIONS[k]);
     }
 
     /// The mouse moved to (row, col): the pointer's there.
@@ -187,9 +207,13 @@ impl Screen {
         sky.trail.push(at);
     }
 
-    /// Where the phone remote pointed, and tapped, as the mouse would.
+    /// Where the phone remote pointed, and tapped, as the mouse would; and
+    /// watchers' reactions.
     pub fn steer(&mut self) {
         let Some(h) = self.tap.clone() else { return };
+        for k in h.reactions() {
+            self.react(k);
+        }
         for (x, y, t) in h.points() {
             let (row, col) = ((y * (self.h - 1) as f64).round() as i32 + 1, (x * (self.w - 1) as f64).round() as i32 + 1);
             match t {
@@ -278,7 +302,7 @@ impl Screen {
     }
 
     pub fn thaw(&mut self) {
-        let pointing = self.pointing();
+        let pointing = self.pointing() || self.reacting();
         match self.sky.as_mut() {
             Some(s) if s.kind == Kind::None && !s.glow && !pointing => self.sky = None,
             Some(s) => s.thaw(),
@@ -325,6 +349,10 @@ impl Screen {
                 continue;
             }
             self.seen[i] = Some(want);
+            // The right half of a reaction, drawn with its left.
+            if want.ch == '\0' {
+                continue;
+            }
             if at != Some(c) {
                 self.goto(row, c);
             }
