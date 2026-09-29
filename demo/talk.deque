@@ -5,6 +5,8 @@
 ---
 fx: assemble
 then: shine sparkle
+sky: stars
+glow: on
 
 # DEQUE
 // run deque notes demo/talk.deque in another terminal to see these
@@ -193,22 +195,24 @@ then: pulse
 ## code
 # CODE
 ```ts
-// a fence with a language is code, in the talk's colors
 export function fee(order: Order): number {
   return order.total > 100 ? 0 : order.total * 0.1;
 }
 ```
+{muted}a fence with a language is code, in the talk's colors{/}
 
 ---
-## code · morph
+## code
 # CODE
 ```ts
-// the same language as the slide before: its code morphed into this
+const FREE = 100;
+
 export function fee(order: Order, rate = 0.1): number {
   if (order.total > FREE) return 0;
   return order.total * rate;
 }
 ```
+{muted}the same language on the next slide: it morphs{/}
 
 ---
 ## code · run
@@ -218,6 +222,21 @@ for n in 3 2 1; do echo "${n}…"; sleep 0.3; done
 echo "its output streams in under it"
 ```
 {muted}→ runs it · a key stops it{/}
+
+---
+## morph · before
+# SHAPE
+a slide, and the next one
+that says `tr: morph`
+
+---
+tr: morph
+
+## morph · after
+# SHIFT
+`tr: morph`: the slide before turned into this one
+its words, code and headline swing to their new places
+{muted}at the top of a talk, every slide flows into the next{/}
 
 ---
 ## presenting
@@ -274,6 +293,35 @@ then: sparkle
 `then: sparkle`
 
 glints coming and going around it
+
+---
+sky: stars
+
+## skies · stars
+# STARS
+`sky: stars`
+
+behind the slide the whole time it's up
+{muted}now and then one shoots across{/}
+
+---
+sky: embers
+glow: on
+
+## skies · embers
+# EMBERS
+`sky: embers` · `glow: on`
+
+the headline lights what's around it, breathing
+
+---
+sky: life
+
+## skies · life
+# LIFE
+`sky: life`
+
+{muted}also: snow, rain · drawn a quarter of a cell at a time{/}
 
 ---
 tr: dissolve

@@ -40,7 +40,17 @@ pub const TR: &[Named] = &[
     ("dissolve", "the slide before falls away a cell at a time"),
     ("sweep", "a bar crosses the screen, leaving it empty"),
     ("curtain", "bars from both sides, meeting in the middle"),
+    ("morph", "the slide before turns into this one: its words, code and headline swing to their new places"),
     ("none", "straight to the next slide (the default)"),
+];
+
+pub const SKY: &[Named] = &[
+    ("stars", "stars twinkling and drifting, now and then one shooting across"),
+    ("snow", "snow falling, swaying as it goes"),
+    ("rain", "rain streaking down"),
+    ("embers", "sparks rising from the bottom, flickering out"),
+    ("life", "Conway's Game of Life, faint, never settling"),
+    ("none", "the terminal's own background (the default)"),
 ];
 
 pub const COLORS: &[Named] = &[
@@ -72,6 +82,8 @@ pub const SLIDE: &[Opt] = &[
     opt("reveal", "how a step (`> line`) arrives", LINES),
     opt("then", "flourishes once the slide is all there, space-separated", THEN),
     opt("tr", "how the slide before this one leaves", TR),
+    opt("sky", "what moves behind the slide, the whole time it's up", SKY),
+    opt("glow", "the headline lighting what's around it, breathing", ON_OFF),
     opt("enter", "a command enter runs instead of going on: a TUI, a shell, a demo. Run by sh (cmd on Windows) in the talk's folder", &[]),
     opt("cols", "with --tv, how many columns wide the screen is while `enter` runs", &[]),
     opt("draw", "a drawn slide, WIDTHxHEIGHT: its lines are drawing commands, not text", &[]),
@@ -84,6 +96,8 @@ pub const TALK: &[Opt] = &[
     opt("reveal", "how steps arrive, unless a slide says otherwise", LINES),
     opt("then", "flourishes on every slide, unless a slide says otherwise", THEN),
     opt("tr", "how slides leave, unless a slide says otherwise", TR),
+    opt("sky", "what moves behind every slide, unless a slide says otherwise; one sky goes on from slide to slide", SKY),
+    opt("glow", "headlines lighting what's around them, unless a slide says otherwise", ON_OFF),
     opt("cursor", "whether the cursor shows; --cursor and --no-cursor win over it", ON_OFF),
     opt("accent", "color: headlines, and what should stand out. #rrggbb or 38;2;r;g;b", &[]),
     opt("muted", "color: asides and labels. #rrggbb or 38;2;r;g;b", &[]),

@@ -129,7 +129,11 @@ pub fn run(path: &Path, from: Option<&Path>, still: bool) -> Result<(), String> 
                 Ok(Event::Key(k)) => Some(k),
                 _ => None,
             },
-            None => None,
+            None => {
+                s.sky_frame();
+                s.flush();
+                None
+            }
         };
         if let Some(k) = key {
             let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);

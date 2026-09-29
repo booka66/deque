@@ -2,6 +2,7 @@
 //! Rows and columns count from 1, as the terminal does.
 
 use crate::markup::{self, Cell, Rgb, Style, Theme};
+use crate::sky::{Kind, Sky};
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -30,6 +31,18 @@ pub struct Screen {
     /// Recording, for --cast: what's flushed is kept with the time it was,
     /// and a frame's wait is only the clock moving on.
     pub rec: Option<Rec>,
+    /// What's behind the slide, when it has something. Then what's put is
+    /// kept, cell by cell, to draw the sky around and under it.
+    pub sky: Option<Sky>,
+    /// What's been put, None where it's see-through, and what the terminal
+    /// shows, None where that isn't known: only what changed is sent.
+    front: Vec<Option<Cell>>,
+    seen: Vec<Option<Cell>>,
+    /// When the sky was last drawn, on the screen's clock.
+    sky_at: f64,
+    born: Instant,
+    /// The terminal's font, for text that moves as pictures; see fine.rs.
+    pub font: Option<fontdue::Font>,
 }
 
 #[derive(Default)]
@@ -86,6 +99,12 @@ impl Screen {
             rng: Rng::new(seed),
             watch: None,
             rec: None,
+            sky: None,
+            front: vec![],
+            seen: vec![],
+            sky_at: 0.0,
+            born: Instant::now(),
+            font: None,
         };
         s.size();
         s
@@ -104,7 +123,128 @@ impl Screen {
             return;
         }
         if let Ok((w, h)) = crossterm::terminal::size() {
+            let was = (self.w, self.h);
             (self.w, self.h) = (w as i32, h as i32);
+            if was != (self.w, self.h) {
+                if let Some(s) = self.sky.take() {
+                    self.backdrop(s.kind, s.glow);
+                }
+            }
+        }
+    }
+
+    /// Seconds since the screen was made, or into the recording.
+    pub fn now(&self) -> f64 {
+        self.rec.as_ref().map_or_else(|| self.born.elapsed().as_secs_f64(), |r| r.clock)
+    }
+
+    /// The slide's sky. One the same as the last is kept, so it goes on
+    /// moving from slide to slide.
+    pub fn backdrop(&mut self, kind: Kind, glow: bool) {
+        if kind == Kind::None && !glow {
+            self.sky = None;
+            return;
+        }
+        if let Some(s) = self.sky.as_mut().filter(|s| s.kind == kind) {
+            s.glow = glow;
+            return;
+        }
+        let n = (self.w * self.h).max(0) as usize;
+        (self.front, self.seen) = (vec![None; n], vec![None; n]);
+        let mut sky = Sky::new(kind, glow, self.w, self.h, self.rng.below(1 << 30) as u32);
+        self.sky_at = self.now();
+        sky.frame(self.sky_at, &self.theme, &self.front, self.w as usize);
+        self.sky = Some(sky);
+    }
+
+    /// The sky moved on and drawn again where it changed, when a frame of
+    /// it is due.
+    pub fn sky_frame(&mut self) {
+        let fps = if self.rec.is_some() { 15.0 } else { 30.0 };
+        let now = self.now();
+        let Some(sky) = self.sky.as_mut() else { return };
+        if now - self.sky_at < 1.0 / fps - 1e-6 {
+            return;
+        }
+        self.sky_at = now;
+        sky.frame(now, &self.theme, &self.front, self.w as usize);
+        self.raw("\x1b[?2026h");
+        for r in 1..=self.h {
+            self.paint(r, 1, self.w);
+        }
+        self.raw("\x1b[?2026l");
+    }
+
+    fn idx(&self, row: i32, col: i32) -> usize {
+        ((row - 1) * self.w + col - 1) as usize
+    }
+
+    /// Columns lo to hi of a row as the sky and what's on it make them,
+    /// sending only the cells that changed.
+    fn paint(&mut self, row: i32, lo: i32, hi: i32) {
+        let mut at: Option<i32> = None;
+        let mut st: Option<Style> = None;
+        for c in lo..=hi {
+            let i = self.idx(row, c);
+            let f = self.front[i];
+            // The right half of a wide letter, drawn with its left.
+            if f.is_some_and(|f| f.ch == '\0') {
+                continue;
+            }
+            let want = self.sky.as_ref().unwrap().look((row - 1) as usize, (c - 1) as usize, f);
+            if self.seen[i] == Some(want) {
+                continue;
+            }
+            self.seen[i] = Some(want);
+            if at != Some(c) {
+                self.goto(row, c);
+            }
+            match st {
+                Some(was) if was == want.st => {}
+                // Only the colors that changed, when that's all it is.
+                Some(was) if was.bold == want.st.bold => {
+                    if was.fg != want.st.fg {
+                        match want.st.fg {
+                            Some(c) => self.color(c, false),
+                            None => self.raw("\x1b[39m"),
+                        }
+                    }
+                    if was.bg != want.st.bg {
+                        match want.st.bg {
+                            Some(c) => self.color(c, true),
+                            None => self.raw("\x1b[49m"),
+                        }
+                    }
+                }
+                _ => self.style(want.st),
+            }
+            st = Some(want.st);
+            let mut b = [0; 4];
+            self.raw(want.ch.encode_utf8(&mut b));
+            at = Some(c + want.ch.width().unwrap_or(0) as i32);
+        }
+        if st.is_some() {
+            self.raw("\x1b[0m");
+        }
+    }
+
+    /// put, with a sky: kept, then painted.
+    fn put_over(&mut self, row: i32, col: i32, l: &[Cell]) {
+        let (mut c, mut lo, mut hi) = (col, i32::MAX, 0);
+        for cell in l {
+            let cw = cell.ch.width().unwrap_or(0) as i32;
+            if c >= 1 && c + cw - 1 <= self.w {
+                let i = self.idx(row, c);
+                self.front[i] = (cell.ch != ' ' || cell.st.bg.is_some()).then_some(*cell);
+                if cw == 2 {
+                    self.front[i + 1] = Some(Cell { ch: '\0', st: cell.st });
+                }
+                (lo, hi) = (lo.min(c), hi.max(c + cw - 1));
+            }
+            c += cw;
+        }
+        if lo <= hi {
+            self.paint(row, lo, hi);
         }
     }
 
@@ -162,6 +302,9 @@ impl Screen {
         if row < 1 || row > self.h {
             return;
         }
+        if self.sky.is_some() {
+            return self.put_over(row, col, l);
+        }
         let mut c = col;
         let mut at: Option<i32> = None;
         let mut st: Option<Style> = None;
@@ -191,6 +334,14 @@ impl Screen {
     }
 
     pub fn clear_row(&mut self, row: i32) {
+        if self.sky.is_some() {
+            if (1..=self.h).contains(&row) {
+                let i = self.idx(row, 1);
+                self.front[i..i + self.w as usize].fill(None);
+                self.paint(row, 1, self.w);
+            }
+            return;
+        }
         self.raw(&format!("\x1b[{row};1H\x1b[2K"));
     }
 
@@ -203,6 +354,18 @@ impl Screen {
     pub fn clear(&mut self) {
         if self.kitty {
             self.raw("\x1b_Ga=d,d=a,q=2\x1b\\");
+        }
+        if self.sky.is_some() {
+            // Emptied in the sky's own background, then the sky put back.
+            let blank = Cell { ch: ' ', st: Style { bg: Some(self.theme.bg), ..Style::default() } };
+            self.style(blank.st);
+            self.raw("\x1b[H\x1b[2J\x1b[0m");
+            self.front.fill(None);
+            self.seen.fill(Some(blank));
+            for r in 1..=self.h {
+                self.paint(r, 1, self.w);
+            }
+            return;
         }
         self.raw("\x1b[H\x1b[2J");
     }
@@ -239,7 +402,14 @@ impl Screen {
     pub fn tick(&mut self, secs: f64) {
         self.flush();
         if let Some(r) = self.rec.as_mut() {
-            r.clock += secs;
+            // Recorded, the clock goes on a sky frame at a time.
+            let end = r.clock + secs;
+            while self.sky.is_some() && self.sky_at + 1.0 / 15.0 < end {
+                self.rec.as_mut().unwrap().clock = self.sky_at + 1.0 / 15.0;
+                self.sky_frame();
+                self.flush();
+            }
+            self.rec.as_mut().unwrap().clock = end;
             return;
         }
         if self.hurry {
@@ -255,8 +425,13 @@ impl Screen {
                 self.hurry = true;
                 return;
             }
-            let wait = if self.watch.is_some() { (end - now).min(Duration::from_millis(20)) } else { end - now };
+            let mut wait = if self.watch.is_some() { (end - now).min(Duration::from_millis(20)) } else { end - now };
+            if self.sky.is_some() {
+                wait = wait.min(Duration::from_millis(15));
+            }
             if !event::poll(wait).unwrap_or(false) {
+                self.sky_frame();
+                self.flush();
                 continue;
             }
             match event::read() {

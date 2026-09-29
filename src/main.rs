@@ -1,6 +1,7 @@
 //! deque: a talk in the terminal, from a text file.
 
 mod figlet;
+mod fine;
 mod cast;
 mod code;
 mod fx;
@@ -15,6 +16,7 @@ mod preview;
 mod render;
 mod run;
 mod screen;
+mod sky;
 mod spec;
 mod talk;
 
@@ -203,6 +205,9 @@ fn present(args: &[String]) -> Result<(), String> {
     }));
     let proto = images::detect();
     s.kitty = proto == images::Proto::Kitty;
+    if s.kitty {
+        s.font = fine::font();
+    }
     let mut pics = images::Pictures::new(proto);
     let show = if cursor { "\x1b[?25h" } else { "\x1b[?25l" };
     // The wheel, on this screen, is sent as ↑ and ↓ unless alternate scroll
@@ -263,7 +268,7 @@ fn present(args: &[String]) -> Result<(), String> {
                     s.size();
                     break Act::Redraw;
                 }
-                if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                if event::poll(Duration::from_millis(if s.sky.is_some() { 15 } else { 100 })).unwrap_or(false) {
                     match event::read() {
                         Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => break act(k),
                         Ok(Event::Resize(..)) => s.resized = true,
@@ -271,6 +276,8 @@ fn present(args: &[String]) -> Result<(), String> {
                     }
                     continue;
                 }
+                s.sky_frame();
+                s.flush();
                 if let Some(c) = link.take() {
                     break match c.split_once(' ') {
                         Some(("goto", k)) => k.parse().map_or(Act::Redraw, Act::Goto),

@@ -5,8 +5,9 @@
 use crate::fx::{self, Art};
 use crate::images::Pictures;
 use crate::markup::{self, Cell, Line, Style};
-use crate::morph::{self, Part};
+use crate::morph::{self, Part, Role};
 use crate::screen::Screen;
+use crate::sky::Kind;
 use crate::talk::{Draw, Item, Slide, Talk};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,11 @@ pub fn clear(s: &mut Screen, talk: &Talk, n: usize) {
 /// Slide n (0-based) with its first `shown` steps.
 pub fn draw(s: &mut Screen, talk: &Talk, pics: &mut Pictures, n: usize, mode: Mode, shown: usize, hint: bool) {
     let slide = &talk.slides[n];
+    // Pictures are drawn by the terminal, over whatever a sky would do.
+    match slide.images.is_empty() {
+        true => s.backdrop(Kind::from(&talk.sky(slide)), talk.glow(slide)),
+        false => s.backdrop(Kind::None, false),
+    }
     if !slide.images.is_empty() {
         pictures(s, talk, pics, n);
     } else if let Some(d) = &slide.draw {
@@ -74,23 +80,26 @@ fn layout(s: &Screen, slide: &Slide) -> (i32, i32, i32, i32) {
     (top, arow, rrow, brow)
 }
 
-/// Where each part of text slide n goes, with its first `shown` steps.
-fn placed(s: &Screen, talk: &Talk, n: usize, shown: usize) -> Vec<Part> {
+/// Where each part of text slide n goes, with its first `shown` steps, and
+/// what it does in a morph: code moves, and with `whole` everything does.
+fn placed(s: &Screen, talk: &Talk, n: usize, shown: usize, whole: bool) -> Vec<Part> {
     let slide = &talk.slides[n];
     let (lrow, arow, rrow, brow) = layout(s, slide);
+    let (moves, art) = if whole { (Role::Moves, Role::Art) } else { (Role::Still, Role::Still) };
     let mut out: Vec<Part> = vec![];
     if let Some(l) = label(s, slide, n) {
-        out.push((lrow, s.mid(markup::width(&l)), l, false));
+        out.push((lrow, s.mid(markup::width(&l)), l, moves));
     }
     let aw = slide.art.first().map_or(0, |r| r.len() as i32);
     for (i, r) in slide.art.iter().enumerate() {
-        out.push((arow + i as i32, (s.w - aw) / 2 + 1, markup::plain(&r.iter().collect::<String>(), s.accent()), false));
+        out.push((arow + i as i32, (s.w - aw) / 2 + 1, markup::plain(&r.iter().collect::<String>(), s.accent()), art));
     }
     if rrow > 0 {
-        out.push((rrow, s.mid(8), markup::plain("━━━━━━━━", s.accent()), false));
+        out.push((rrow, s.mid(8), markup::plain("━━━━━━━━", s.accent()), Role::Still));
     }
     for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| b.step <= shown) {
-        out.push((brow + i as i32, s.mid(markup::width(&b.line)), b.line.clone(), b.code));
+        let role = if b.code { Role::Moves } else { moves };
+        out.push((brow + i as i32, s.mid(markup::width(&b.line)), b.line.clone(), role));
     }
     out
 }
@@ -158,7 +167,11 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
         }
     }
     if let Mode::Morph(from) = mode {
-        morph::play(s, &placed(s, talk, from, usize::MAX), &placed(s, talk, n, shown));
+        let whole = talk.tr(slide) == "morph";
+        morph::play(s, &placed(s, talk, from, usize::MAX, whole), &placed(s, talk, n, shown, whole));
+        if whole && !art.is_empty() {
+            a.land(s);
+        }
         for t in talk.then(slide) {
             fx::then(s, &a, &t);
         }

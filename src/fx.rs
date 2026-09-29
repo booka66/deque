@@ -3,6 +3,7 @@
 //! how the slide before leaves (tr). Each stops waiting once a key is
 //! pressed, and ends where it would have.
 
+use crate::fine::{Movers, Plate};
 use crate::markup::{self, Cell, Line, Rgb, Style};
 use crate::screen::{Screen, ease};
 use std::f64::consts::PI;
@@ -35,6 +36,37 @@ impl Art<'_> {
         for (i, r) in self.rows.iter().enumerate() {
             s.put(self.row(i), self.ax, &cells(r, st));
         }
+    }
+
+    /// Where each of its solid blocks goes, in pixels, two to a cell each
+    /// way, with the row of the headline it's in.
+    fn blocks(&self) -> Vec<(f64, f64, usize)> {
+        let mut out = vec![];
+        for (i, r) in self.rows.iter().enumerate() {
+            for (j, &ch) in r.iter().enumerate() {
+                if ch == '█' {
+                    out.push((2.0 * (self.ax - 1 + j as i32) as f64, 2.0 * (self.row(i) - 1) as f64, i));
+                }
+            }
+        }
+        out
+    }
+
+    /// The blocks where they go, and their shadow coming up after them.
+    pub fn land(&self, s: &mut Screen) {
+        let (bg, acc) = (s.theme.bg, s.theme.accent);
+        for f in 1..=5 {
+            if s.hurry {
+                break;
+            }
+            let sh = Style::fg(bg.mix(acc, f as f64 / 5.0));
+            for (i, r) in self.rows.iter().enumerate() {
+                let l: Line = r.iter().map(|&ch| Cell { ch, st: if ch == '█' { Style::fg(acc) } else { sh } }).collect();
+                s.put(self.row(i), self.ax, &l);
+            }
+            s.tick(0.02);
+        }
+        self.done(s);
     }
 
     fn label(&self, s: &mut Screen) {
@@ -101,71 +133,63 @@ fn iris(s: &mut Screen, a: &Art) {
     a.done(s);
 }
 
-/// slide: in from off the left edge.
+/// slide: in from off the left edge, a quarter of a cell at a time.
 fn slide(s: &mut Screen, a: &Art) {
-    let n = 14;
-    let st = s.accent();
+    let (n, st) = (22, s.accent());
+    let run = 2.0 * (a.ax - 1 + a.aw) as f64;
+    let blocks = a.blocks();
+    let mut p = Plate::default();
     for f in 1..=n {
         if s.hurry {
             break;
         }
-        let col = 1 - a.aw + ((a.ax - 1 + a.aw) as f64 * ease(f, n)) as i32;
-        for (i, r) in a.rows.iter().enumerate() {
-            s.at(a.row(i), col, &cells(r, st));
-        }
-        s.tick(0.02);
+        let dx = run * (1.0 - ease(f, n));
+        p.draw(s, blocks.iter().map(|&(x, y, _)| (x - dx, y)), st);
+        s.tick(0.014);
     }
-    a.done(s);
+    p.clear(s);
+    a.land(s);
 }
 
 /// zip: the rows in from both edges at once, alternating.
 fn zip(s: &mut Screen, a: &Art) {
-    let n = 14;
-    let st = s.accent();
+    let (n, st) = (22, s.accent());
+    let (left, right) = (2.0 * (a.ax - 1 + a.aw) as f64, 2.0 * (s.w - a.ax + 1) as f64);
+    let blocks = a.blocks();
+    let mut p = Plate::default();
     for f in 1..=n {
         if s.hurry {
             break;
         }
-        let e = ease(f, n);
-        for (i, r) in a.rows.iter().enumerate() {
-            let from = if i % 2 == 0 { 1 - a.aw } else { s.w + 1 };
-            s.at(a.row(i), from + ((a.ax - from) as f64 * e) as i32, &cells(r, st));
-        }
-        s.tick(0.02);
+        let k = 1.0 - ease(f, n);
+        p.draw(s, blocks.iter().map(|&(x, y, i)| (if i % 2 == 0 { x - left * k } else { x + right * k }, y)), st);
+        s.tick(0.014);
     }
-    a.done(s);
+    p.clear(s);
+    a.land(s);
 }
 
 /// drop: the rows fall from the top, the bottom one first, and stack.
 fn drop(s: &mut Screen, a: &Art) {
-    let (n, d, k) = (10, 2, a.rows.len() as i32);
-    let st = s.accent();
-    let mut was: Vec<i32> = vec![];
+    let (n, d, k, st) = (16, 3, a.rows.len() as i32, s.accent());
+    let blocks = a.blocks();
+    let mut p = Plate::default();
     for f in 1..=n + d * (k - 1) {
         if s.hurry {
             break;
         }
-        for &r in &was {
-            s.clear_row(r);
-        }
-        was.clear();
+        // Each row from the top of the screen, once its turn comes.
+        let fall = |i: usize| {
+            let t = f - d * (k - 1 - i as i32);
+            (t > 0).then(|| ease(t.min(n), n))
+        };
+        p.draw(s, blocks.iter().filter_map(|&(x, y, i)| fall(i).map(|e| (x, y * e))), st);
         a.label(s);
-        for i in (0..k).rev() {
-            let t = f - d * (k - 1 - i);
-            if t <= 0 {
-                continue;
-            }
-            let row = 1 + ((a.arow + i - 1) as f64 * ease(t.min(n), n)) as i32;
-            s.put(row, a.ax, &cells(&a.rows[i as usize], st));
-            was.push(row);
-        }
-        s.tick(0.025);
+        s.tick(0.016);
     }
-    for &r in &was {
-        s.clear_row(r);
-    }
+    p.clear(s);
     a.label(s);
-    a.done(s);
+    a.land(s);
 }
 
 /// fade: up out of the background.
@@ -214,42 +238,27 @@ fn scramble(s: &mut Screen, a: &Art) {
     a.done(s);
 }
 
-/// assemble: every cell flies in from somewhere on the screen.
+/// assemble: every block flies in from somewhere on the screen.
 fn assemble(s: &mut Screen, a: &Art) {
-    let n = 18;
-    let st = s.accent();
+    let (n, st) = (26, s.accent());
     s.rng.seed(a.aw as u32);
-    let mut cs = vec![];
-    for (i, r) in a.rows.iter().enumerate() {
-        for (j, &ch) in r.iter().enumerate() {
-            if ch != ' ' {
-                let from = (s.rng.below(s.h - 2) + 1, s.rng.below(s.w) + 1);
-                cs.push((a.row(i), a.ax + j as i32, from, ch));
-            }
-        }
-    }
-    let mut erase: Vec<(i32, i32)> = vec![];
+    let blocks: Vec<(f64, f64, f64, f64)> = a
+        .blocks()
+        .into_iter()
+        .map(|(x, y, _)| (x, y, s.rng.below(2 * s.w) as f64, s.rng.below(2 * (s.h - 2)) as f64))
+        .collect();
+    let mut p = Plate::default();
     for f in 1..=n {
         if s.hurry {
             break;
         }
         let e = ease(f, n);
-        for &(r, c) in &erase {
-            s.put_str(r, c, " ", Style::default());
-        }
-        erase.clear();
-        for &(ty, tx, (sy, sx), ch) in &cs {
-            let (r, c) = (sy + ((ty - sy) as f64 * e) as i32, sx + ((tx - sx) as f64 * e) as i32);
-            s.put(r, c, &[Cell { ch, st }]);
-            erase.push((r, c));
-        }
-        s.tick(0.025);
+        p.draw(s, blocks.iter().map(|&(x, y, sx, sy)| (sx + (x - sx) * e, sy + (y - sy) * e)), st);
+        s.tick(0.018);
     }
-    for &(r, c) in &erase {
-        s.put_str(r, c, " ", Style::default());
-    }
+    p.clear(s);
     a.label(s);
-    a.done(s);
+    a.land(s);
 }
 
 /// glitch: wipes in, tears and breaks up, goes dark a moment, and comes
@@ -320,14 +329,19 @@ pub fn line_in(s: &mut Screen, name: &str, row: i32, t: &Line) {
         }
         // glide: in from the right edge, easing into place.
         "glide" => {
-            for f in 1..=10 {
+            let mut mv = Movers::new(s, &[t]);
+            let n = 16;
+            for f in 1..=n {
                 if s.hurry {
                     break;
                 }
-                let c = s.w - ((s.w - col) as f64 * ease(f, 10)) as i32;
-                s.at(row, c, &p);
-                s.tick(0.015);
+                let c = s.w as f64 - (s.w - col) as f64 * ease(f, n);
+                s.clear_row(row);
+                mv.at(0, row as f64, c, p.clone());
+                mv.show(s);
+                s.tick(0.01);
             }
+            mv.done(s);
             s.clear_row(row);
         }
         // fade: up out of the background, then in its colors.
@@ -459,17 +473,23 @@ fn pulse(s: &mut Screen, a: &Art) {
 
 /// shake: the headline jolted side to side, settling.
 fn shake(s: &mut Screen, a: &Art) {
-    let st = s.accent();
-    for d in [4, -4, 3, -3, 2, -2, 1, -1, 0] {
+    let (n, st) = (24, s.accent());
+    let blocks = a.blocks();
+    let mut p = Plate::default();
+    for (i, r) in a.rows.iter().enumerate() {
+        s.put(a.row(i), a.ax, &markup::plain(&" ".repeat(r.len()), Style::default()));
+    }
+    for f in 0..=n {
         if s.hurry {
             break;
         }
-        for (i, r) in a.rows.iter().enumerate() {
-            s.at(a.row(i), a.ax + d, &cells(r, st));
-        }
-        s.tick(0.03);
+        let t = f as f64 / n as f64;
+        let dx = 8.0 * (1.0 - t).powi(2) * (t * 6.0 * PI).sin();
+        p.draw(s, blocks.iter().map(|&(x, y, _)| (x + dx, y)), st);
+        s.tick(0.014);
     }
-    a.done(s);
+    p.clear(s);
+    a.land(s);
 }
 
 /// rainbow: colors running through the headline, then back to itself.
@@ -601,8 +621,7 @@ pub fn transition(s: &mut Screen, name: &str) {
                 }
                 for _ in 0..o {
                     let (r, c) = (s.rng.below(rows) + 1, s.rng.below(s.w) + 1);
-                    s.goto(r, c);
-                    s.raw(" ");
+                    s.put_str(r, c, " ", Style::default());
                 }
                 s.tick(0.03);
             }

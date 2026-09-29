@@ -164,7 +164,9 @@ pub fn detect() -> Proto {
         Ok("blocks") => return Proto::Blocks,
         _ => {}
     }
-    if std::env::var("TMUX").is_ok() {
+    // Inside a multiplexer, pictures would land where it doesn't expect, at
+    // a size it doesn't know.
+    if ["TMUX", "HERDR_PANE_ID"].iter().any(|k| std::env::var_os(k).is_some()) {
         return Proto::Blocks;
     }
     let reply = ask("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c");

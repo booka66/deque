@@ -120,6 +120,8 @@ pub fn go(s: &mut Screen, talk: &Talk, n: usize) -> Output {
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
         };
+        s.sky_frame();
+        s.flush();
         if s.rec.is_none() && event::poll(Duration::ZERO).unwrap_or(false) {
             match event::read() {
                 Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => {

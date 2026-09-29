@@ -25,6 +25,8 @@ pub struct Effects {
     pub reveal: Option<String>,
     pub then: Option<Vec<String>>,
     pub tr: Option<String>,
+    pub sky: Option<String>,
+    pub glow: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,13 +153,22 @@ impl Talk {
     pub fn tr(&self, s: &Slide) -> String {
         s.fx.tr.clone().or(self.fx.tr.clone()).unwrap_or("none".into())
     }
-    /// Whether slide `to` arrives from `from` by its code turning into the
-    /// new code: both have code in the same language, and `to` sets no
-    /// `tr:` of its own.
+    pub fn sky(&self, s: &Slide) -> String {
+        s.fx.sky.clone().or(self.fx.sky.clone()).unwrap_or("none".into())
+    }
+    pub fn glow(&self, s: &Slide) -> bool {
+        s.fx.glow.clone().or(self.fx.glow.clone()).is_some_and(|g| g == "on")
+    }
+    /// Whether slide `to` arrives from `from` by turning into it: all of
+    /// it with `tr: morph`, or its code, when both have code in the same
+    /// language and `to` sets no `tr:` of its own.
     pub fn morphs(&self, from: usize, to: usize) -> bool {
-        let lang = |s: &Slide| s.lang.clone().filter(|_| s.images.is_empty() && s.draw.is_none());
+        let text = |s: &Slide| s.images.is_empty() && s.draw.is_none();
         let (a, b) = (&self.slides[from], &self.slides[to]);
-        lang(a).is_some() && lang(a) == lang(b) && b.fx.tr.is_none()
+        if !text(a) || !text(b) {
+            return false;
+        }
+        self.tr(b) == "morph" || (a.lang.is_some() && a.lang == b.lang && b.fx.tr.is_none())
     }
 }
 
@@ -274,6 +285,8 @@ impl P<'_> {
             "lines" => e.lines = self.one_of("lines effect", v, col, spec::LINES),
             "reveal" => e.reveal = self.one_of("reveal effect", v, col, spec::LINES),
             "tr" => e.tr = self.one_of("transition", v, col, spec::TR),
+            "sky" => e.sky = self.one_of("sky", v, col, spec::SKY),
+            "glow" => e.glow = self.one_of("glow", v, col, spec::ON_OFF),
             "then" => {
                 let mut all = vec![];
                 let mut at = col;
