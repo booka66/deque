@@ -20,6 +20,7 @@ Or `cargo install --git https://github.com/booka66/deque`.
 deque TALK [N]        present, from slide N
 deque TALK --print    print every slide
 deque TALK --tv       fullscreen in a new Ghostty window (macOS)
+deque TALK --cast F   record it played through, as an asciinema cast
 deque notes TALK      speaker notes and timer; drives the talk
 deque check TALK      report problems
 deque lsp             language server
@@ -64,6 +65,7 @@ caption
 | `text` | centered line |
 | `> text` | step |
 | ```` ``` ```` | column-aligned block; ```` ```lang ```` highlights code |
+| ```` ```sh run ```` | code that runs on a step, its output under it |
 | `![label](file)` | picture; side by side on one line |
 | `// text` | speaker note |
 
@@ -79,6 +81,12 @@ Inline: `**bold**` `` `code` `` `{accent}…{/}` `${ENV}`
 | `enter:` | command to run on enter |
 | `cols:` | columns while `enter:` runs, with `--tv` |
 | `draw:` | `WxH` canvas: `text` `center` `box` `arrow` `dotted` `clear` `step` |
+
+Code in the same language on slides in a row morphs: what's in both glides to its new place, the rest fades. A slide's own `tr:` turns that off.
+
+A `run` block runs in the talk's folder (`sh` `bash` `zsh` `fish` `py` `js` `rb`); a key stops it. Leave out the headline to give its output room.
+
+`--cast talk.cast` is 100x30 unless `--size WxH` says; [agg](https://github.com/asciinema/agg) turns it into a GIF.
 
 Options before the first `---` are defaults. Colors: `accent` `muted` `good` `bad` `warm` `link` `fg` `bg` (`#rrggbb`).
 

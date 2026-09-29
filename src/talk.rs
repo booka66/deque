@@ -34,6 +34,19 @@ pub struct Body {
     pub src: usize,
     /// The step it comes in on, 0 for there with the slide.
     pub step: usize,
+    /// Whether it's a line of a ```lang block.
+    pub code: bool,
+}
+
+/// A ```lang run block: what runs it, and when.
+#[derive(Clone, Debug)]
+pub struct Run {
+    /// The program, its flag for code to run, and the block's code.
+    pub argv: Vec<String>,
+    /// The step its output comes in on.
+    pub step: usize,
+    /// Its first line's place in the body.
+    pub at: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +91,9 @@ pub struct Slide {
     pub enter: Option<String>,
     pub cols: Option<i32>,
     pub fx: Effects,
+    /// The language of its first ```lang block.
+    pub lang: Option<String>,
+    pub run: Option<Run>,
     /// Its speaker notes, the `//` lines.
     pub notes: Vec<String>,
 }
@@ -103,7 +119,7 @@ impl Slide {
     pub fn steps(&self) -> usize {
         match &self.draw {
             Some(d) => d.groups.len() - 1,
-            None => self.body.iter().map(|b| b.step).max().unwrap_or(0),
+            None => self.body.iter().map(|b| b.step).chain(self.run.as_ref().map(|r| r.step)).max().unwrap_or(0),
         }
     }
 }
@@ -135,6 +151,14 @@ impl Talk {
     pub fn tr(&self, s: &Slide) -> String {
         s.fx.tr.clone().or(self.fx.tr.clone()).unwrap_or("none".into())
     }
+    /// Whether slide `to` arrives from `from` by its code turning into the
+    /// new code: both have code in the same language, and `to` sets no
+    /// `tr:` of its own.
+    pub fn morphs(&self, from: usize, to: usize) -> bool {
+        let lang = |s: &Slide| s.lang.clone().filter(|_| s.images.is_empty() && s.draw.is_none());
+        let (a, b) = (&self.slides[from], &self.slides[to]);
+        lang(a).is_some() && lang(a) == lang(b) && b.fx.tr.is_none()
+    }
 }
 
 /// `key: value`, a key being lowercase letters.
@@ -142,6 +166,20 @@ pub fn key_line(l: &str) -> Option<(&str, &str)> {
     let (k, v) = l.split_once(':')?;
     (!k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase()) && (v.is_empty() || v.starts_with(' ')))
         .then(|| (k, v.trim()))
+}
+
+/// What runs a ```lang run block: the program and its flag for code.
+pub fn runner(lang: &str) -> Option<[&'static str; 2]> {
+    Some(match lang {
+        "sh" => ["sh", "-c"],
+        "bash" => ["bash", "-c"],
+        "zsh" => ["zsh", "-c"],
+        "fish" => ["fish", "-c"],
+        "py" | "python" => ["python3", "-c"],
+        "js" | "javascript" => ["node", "-e"],
+        "rb" | "ruby" => ["ruby", "-e"],
+        _ => return None,
+    })
 }
 
 /// The markdown image syntax, when a line is nothing but pictures.
@@ -401,42 +439,69 @@ fn heading(p: &mut P, s: &mut Slide, l: &str) -> bool {
     }
 }
 
+/// Lines that go together: a ``` block, lined up in a column, or any other
+/// line on its own. Each line is (step?, line, the line of the talk).
+#[derive(Default)]
+struct Block {
+    lines: Vec<(bool, Line, usize)>,
+    code: bool,
+    /// For a ```lang run block, what runs it.
+    run: Option<Vec<String>>,
+}
+
 fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
-    // Blocks of lines, each (step?, line): a ``` block is one, lined up in a
-    // column; any other line is one on its own.
-    let mut blocks: Vec<Vec<(bool, Line, usize)>> = vec![];
+    let mut blocks: Vec<Block> = vec![];
     let mut fence: Option<usize> = None;
-    // Inside ```lang: the language, the line after the ```, and the lines so
-    // far, as they are.
-    let mut code: Option<(String, usize, Vec<String>)> = None;
+    // Inside ```lang: the language, whether it runs, the line after the ```,
+    // and the lines so far, as they are.
+    let mut code: Option<(String, Option<[&str; 2]>, usize, Vec<String>)> = None;
     for i in from..end {
         p.n = i;
         let l = lines[i];
-        if let Some(lang) = l.trim_start().strip_prefix("```") {
-            let lang = lang.trim();
+        if let Some(info) = l.trim_start().strip_prefix("```") {
+            let mut words = info.split_whitespace();
+            let lang = words.next().unwrap_or("");
             match fence {
                 None => {
                     fence = Some(i);
-                    blocks.push(vec![]);
+                    blocks.push(Block::default());
                     if !lang.is_empty() {
                         if !code::known(lang) {
                             let at = l.find(lang).unwrap_or(0);
                             p.err(at, at + lang.len(), format!("no language \"{lang}\"; try ts, tsx, js, rs, py, go, sh, json, yaml, sql, diff"));
                         }
-                        code = Some((lang.to_string(), i + 1, vec![]));
+                        let mut run = None;
+                        if let Some(w) = words.next() {
+                            let at = l.rfind(w).unwrap_or(0);
+                            if w != "run" {
+                                p.err(at, at + w.len(), format!("after the language goes `run`, or nothing; not \"{w}\""));
+                            } else if blocks.iter().any(|b| b.run.is_some()) {
+                                p.err(at, at + w.len(), "a second block that runs; a slide has one");
+                            } else {
+                                run = runner(lang);
+                                if run.is_none() {
+                                    p.err(at, at + w.len(), format!("deque can't run {lang}: sh, bash, zsh, fish, py, js and rb run"));
+                                }
+                            }
+                        }
+                        code = Some((lang.to_string(), run, i + 1, vec![]));
                     }
                 }
                 Some(_) => {
                     fence = None;
-                    if let Some((lang, at, src)) = code.take() {
+                    if let Some((lang, run, at, src)) = code.take() {
                         let lit = code::highlight(&src, &lang, &p.theme);
-                        blocks.last_mut().unwrap().extend(lit.into_iter().enumerate().map(|(k, l)| (false, l, at + k)));
+                        s.lang.get_or_insert(lang);
+                        let b = blocks.last_mut().unwrap();
+                        b.lines.extend(lit.into_iter().enumerate().map(|(k, l)| (false, l, at + k)));
+                        b.code = true;
+                        b.run = run.map(|[prog, flag]| vec![prog.to_string(), flag.to_string(), src.join("\n")]);
                     }
                 }
             }
             continue;
         }
-        if let Some((_, _, src)) = code.as_mut() {
+        if let Some((.., src)) = code.as_mut() {
             src.push(l.to_string());
             continue;
         }
@@ -472,30 +537,37 @@ fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
         };
         let line = p.markup(text, col);
         match fence {
-            Some(_) => blocks.last_mut().unwrap().push((step, line, i)),
-            None => blocks.push(vec![(step, line, i)]),
+            Some(_) => blocks.last_mut().unwrap().lines.push((step, line, i)),
+            None => blocks.push(Block { lines: vec![(step, line, i)], ..Block::default() }),
         }
     }
     if let Some(f) = fence {
         p.n = f;
         p.err(0, 3, "a ``` with no ``` to close it");
     }
-    while blocks.first().is_some_and(|b| b.len() == 1 && b[0].1.is_empty() && !b[0].0) {
+    let blank = |b: &Block| b.lines.len() == 1 && b.lines[0].1.is_empty() && !b.lines[0].0;
+    while blocks.first().is_some_and(blank) {
         blocks.remove(0);
     }
-    while blocks.last().is_some_and(|b| b.len() == 1 && b[0].1.is_empty() && !b[0].0) {
+    while blocks.last().is_some_and(blank) {
         blocks.pop();
     }
     let mut step = 0;
     for b in blocks {
-        let w = b.iter().map(|(_, l, _)| markup::width(l)).max().unwrap_or(0);
-        for (is_step, mut line, src) in b {
+        let at = s.body.len();
+        let w = b.lines.iter().map(|(_, l, _)| markup::width(l)).max().unwrap_or(0);
+        for (is_step, mut line, src) in b.lines {
             let pad = w - markup::width(&line);
             line.extend(std::iter::repeat_n(markup::Cell { ch: ' ', st: Style::default() }, pad as usize));
             if is_step {
                 step += 1;
             }
-            s.body.push(Body { line, src, step: if is_step { step } else { 0 } });
+            s.body.push(Body { line, src, step: if is_step { step } else { 0 }, code: b.code });
+        }
+        // Its output comes in on a step of its own, after the block.
+        if let Some(argv) = b.run {
+            step += 1;
+            s.run = Some(Run { argv, step, at });
         }
     }
     if !s.images.is_empty() {

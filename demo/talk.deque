@@ -200,6 +200,26 @@ export function fee(order: Order): number {
 ```
 
 ---
+## code · morph
+# CODE
+```ts
+// the same language as the slide before: its code morphed into this
+export function fee(order: Order, rate = 0.1): number {
+  if (order.total > FREE) return 0;
+  return order.total * rate;
+}
+```
+
+---
+## code · run
+```sh run
+echo "a run block runs on a step"
+for n in 3 2 1; do echo "${n}…"; sleep 0.3; done
+echo "its output streams in under it"
+```
+{muted}→ runs it · a key stops it{/}
+
+---
 ## presenting
 # NOTES
 `// a line like this` in a slide is a speaker note

@@ -112,7 +112,7 @@ pub const SYNTAX: &[(&str, &str)] = &[
     ("## ", "the slide's label, small and numbered above the headline"),
     ("# ", "the headline, in block letters"),
     ("> ", "a step: the line comes in on a key"),
-    ("```", "lines between two of these line up in a column instead of each being centered. With a language (```ts), they're code, highlighted, and taken as they are"),
+    ("```", "lines between two of these line up in a column instead of each being centered. With a language (```ts), they're code, highlighted, and taken as they are; code in the same language on the next slide morphs into its code. ```sh run runs it on a step (sh bash zsh fish py js rb), its output under the slide"),
     ("![", "![label](file.png): a picture. Several on one line go side by side, labelled; on lines of their own, stacked. Text lines become the caption"),
     ("//", "in a slide, a speaker note, shown by `deque notes`; before the first `---`, a comment"),
 ];

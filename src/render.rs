@@ -5,6 +5,7 @@
 use crate::fx::{self, Art};
 use crate::images::Pictures;
 use crate::markup::{self, Cell, Line, Style};
+use crate::morph::{self, Part};
 use crate::screen::Screen;
 use crate::talk::{Draw, Item, Slide, Talk};
 
@@ -16,6 +17,8 @@ pub enum Mode {
     Arrive,
     /// Only the latest step coming in.
     Step,
+    /// Arriving from the slide given, its code turning into this one's.
+    Morph(usize),
 }
 
 /// Slide n's label, numbered from 00: "03 · W H Y".
@@ -71,6 +74,42 @@ fn layout(s: &Screen, slide: &Slide) -> (i32, i32, i32, i32) {
     (top, arow, rrow, brow)
 }
 
+/// Where each part of text slide n goes, with its first `shown` steps.
+fn placed(s: &Screen, talk: &Talk, n: usize, shown: usize) -> Vec<Part> {
+    let slide = &talk.slides[n];
+    let (lrow, arow, rrow, brow) = layout(s, slide);
+    let mut out: Vec<Part> = vec![];
+    if let Some(l) = label(s, slide, n) {
+        out.push((lrow, s.mid(markup::width(&l)), l, false));
+    }
+    let aw = slide.art.first().map_or(0, |r| r.len() as i32);
+    for (i, r) in slide.art.iter().enumerate() {
+        out.push((arow + i as i32, (s.w - aw) / 2 + 1, markup::plain(&r.iter().collect::<String>(), s.accent()), false));
+    }
+    if rrow > 0 {
+        out.push((rrow, s.mid(8), markup::plain("━━━━━━━━", s.accent()), false));
+    }
+    for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| b.step <= shown) {
+        out.push((brow + i as i32, s.mid(markup::width(&b.line)), b.line.clone(), b.code));
+    }
+    out
+}
+
+/// How slide n arrives from the one before it: its code turning into
+/// n's, when both have code, or played in.
+pub fn arrive(talk: &Talk, n: usize) -> Mode {
+    if n > 0 && talk.morphs(n - 1, n) { Mode::Morph(n - 1) } else { Mode::Arrive }
+}
+
+/// Where a slide's run block's output goes: under its lines, a row between,
+/// from the block's left edge.
+pub fn under(s: &Screen, slide: &Slide) -> Option<(i32, i32)> {
+    let r = slide.run.as_ref()?;
+    let (.., brow) = layout(s, slide);
+    let w = slide.body.get(r.at).map_or(0, |b| markup::width(&b.line));
+    Some((brow + slide.body.len() as i32 + 1, s.mid(w)))
+}
+
 /// Where a drawing's top left goes.
 fn canvas(s: &Screen, d: &Draw) -> (i32, i32) {
     (((s.h - d.h) / 2).max(1), ((s.w - d.w) / 2 + 1).max(1))
@@ -114,6 +153,12 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
         for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| seen(b)) {
             fx::line_in(s, &how, brow + i as i32, &b.line);
         }
+        for t in talk.then(slide) {
+            fx::then(s, &a, &t);
+        }
+    }
+    if let Mode::Morph(from) = mode {
+        morph::play(s, &placed(s, talk, from, usize::MAX), &placed(s, talk, n, shown));
         for t in talk.then(slide) {
             fx::then(s, &a, &t);
         }

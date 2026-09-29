@@ -27,6 +27,15 @@ pub struct Screen {
     /// Asked every frame whether to hurry: the preview's, which stops an
     /// animation the moment the editor changes something.
     pub watch: Option<Box<dyn FnMut() -> bool>>,
+    /// Recording, for --cast: what's flushed is kept with the time it was,
+    /// and a frame's wait is only the clock moving on.
+    pub rec: Option<Rec>,
+}
+
+#[derive(Default)]
+pub struct Rec {
+    pub clock: f64,
+    pub frames: Vec<(f64, String)>,
 }
 
 /// A small xorshift, seeded where an effect should look the same each time.
@@ -76,12 +85,24 @@ impl Screen {
             kitty: false,
             rng: Rng::new(seed),
             watch: None,
+            rec: None,
         };
         s.size();
         s
     }
 
+    /// A screen of a set size that records instead of showing.
+    pub fn recording(theme: Theme, w: i32, h: i32) -> Screen {
+        let mut s = Screen::new(theme);
+        (s.w, s.h, s.truecolor) = (w, h, true);
+        s.rec = Some(Rec::default());
+        s
+    }
+
     pub fn size(&mut self) {
+        if self.rec.is_some() {
+            return;
+        }
         if let Ok((w, h)) = crossterm::terminal::size() {
             (self.w, self.h) = (w as i32, h as i32);
         }
@@ -96,6 +117,13 @@ impl Screen {
     }
 
     pub fn flush(&mut self) {
+        if let Some(r) = self.rec.as_mut() {
+            if !self.out.is_empty() {
+                r.frames.push((r.clock, String::from_utf8_lossy(&self.out).into_owned()));
+                self.out.clear();
+            }
+            return;
+        }
         let mut o = std::io::stdout().lock();
         let _ = o.write_all(&self.out);
         let _ = o.flush();
@@ -210,6 +238,10 @@ impl Screen {
     /// from then on no frame waits.
     pub fn tick(&mut self, secs: f64) {
         self.flush();
+        if let Some(r) = self.rec.as_mut() {
+            r.clock += secs;
+            return;
+        }
         if self.hurry {
             return;
         }

@@ -85,10 +85,13 @@ pub fn run(path: &Path, from: Option<&Path>, still: bool) -> Result<(), String> 
                             })
                         }));
                         s.hurry = false;
-                        if showing.is_some_and(|(was, _)| was != n) {
+                        // A slide whose code turns into the next's shows it
+                        // turning, from wherever the cursor came.
+                        let mode = render::arrive(t, n);
+                        if mode == Mode::Arrive && showing.is_some_and(|(was, _)| was != n) {
                             fx::transition(&mut s, &t.tr(&t.slides[n]));
                         }
-                        render::draw(&mut s, t, &mut pics, n, Mode::Arrive, 0, false);
+                        render::draw(&mut s, t, &mut pics, n, mode, 0, false);
                         for k in 1..=steps {
                             s.tick(0.6);
                             if s.hurry {

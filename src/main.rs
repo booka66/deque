@@ -1,6 +1,7 @@
 //! deque: a talk in the terminal, from a text file.
 
 mod figlet;
+mod cast;
 mod code;
 mod fx;
 mod ghostty;
@@ -8,9 +9,11 @@ mod images;
 mod link;
 mod lsp;
 mod markup;
+mod morph;
 mod notes;
 mod preview;
 mod render;
+mod run;
 mod screen;
 mod spec;
 mod talk;
@@ -30,6 +33,9 @@ deque: slides in your terminal
 
   deque TALK [N]       present TALK, from slide N
   deque TALK --print   every slide as text
+  deque TALK --cast FILE [--size WxH]
+                       record the talk played through as an asciinema
+                       cast, 100x30 unless --size says; agg makes a GIF
   deque TALK --tv      fullscreen in a new Ghostty window, the font sized for
                        the screen (macOS); + and − size it
   deque notes TALK     speaker notes, the next slide and a timer, for a
@@ -141,11 +147,22 @@ fn modified(p: &Path) -> Option<SystemTime> {
 fn present(args: &[String]) -> Result<(), String> {
     let mut path: Option<PathBuf> = None;
     let (mut start, mut print, mut tv, mut cursor) = (1usize, false, false, None);
+    let (mut cast, mut size) = (None, (100, 30));
     let mut rest = vec![];
-    for a in args {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "--print" => print = true,
             "--tv" => tv = true,
+            "--cast" => cast = Some(PathBuf::from(it.next().ok_or("deque: --cast FILE: the file to write\n")?)),
+            "--size" => {
+                let v = it.next().map(String::as_str).unwrap_or_default();
+                size = v
+                    .split_once('x')
+                    .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                    .filter(|&(w, h)| w >= 20 && h >= 10)
+                    .ok_or(format!("deque: --size is WIDTHxHEIGHT, like 100x30, not \"{v}\"\n"))?;
+            }
             "--cursor" => cursor = Some(true),
             "--no-cursor" => cursor = Some(false),
             _ if a.starts_with('-') => return Err(format!("deque: no option {a}\n\n{HELP}\n")),
@@ -161,6 +178,9 @@ fn present(args: &[String]) -> Result<(), String> {
     if print {
         print!("{}", render::print_all(&talk, std::io::stdout().is_terminal()));
         return Ok(());
+    }
+    if let Some(file) = cast {
+        return cast::record(&talk, &file, size.0, size.1);
     }
     if tv {
         let abs = path.canonicalize().map_err(|e| e.to_string())?;
@@ -203,6 +223,8 @@ fn present(args: &[String]) -> Result<(), String> {
     let mut link = link::Link::new(&path);
     // A slide number being typed, to go to on enter.
     let mut jump = String::new();
+    // What each slide's run block printed when it last ran, by slide.
+    let mut ran: std::collections::HashMap<usize, run::Output> = Default::default();
     loop {
         s.hurry = false;
         let slide = &talk.slides[n];
@@ -214,6 +236,13 @@ fn present(args: &[String]) -> Result<(), String> {
         }
         started = true;
         render::draw(&mut s, &talk, &mut pics, n, mode, shown, font.is_some());
+        if let Some(r) = &slide.run {
+            if mode == Mode::Step && shown == r.step {
+                ran.insert(n, run::go(&mut s, &talk, n));
+            } else if let Some(o) = ran.get(&n).filter(|_| shown >= r.step) {
+                run::show(&mut s, &talk, n, o, false);
+            }
+        }
         if let Some(p) = &problem {
             let st = markup::Style::fg(talk.theme.bad);
             s.put_str(s.h, 1, p, st);
@@ -266,6 +295,7 @@ fn present(args: &[String]) -> Result<(), String> {
                             let edited = changed(&src, &talk, &new, &t);
                             talk = t;
                             src = new;
+                            ran.clear();
                             s.theme = talk.theme.clone();
                             problem = None;
                             n = edited.unwrap_or(n).min(talk.slides.len() - 1);
@@ -316,7 +346,7 @@ fn present(args: &[String]) -> Result<(), String> {
             }
             Act::Last => (n, shown) = (last, talk.slides[last].steps()),
             Act::Goto(k) => (n, shown, mode) = (k.min(last), 0, Mode::Arrive),
-            Act::Replay => (shown, mode, started) = (0, Mode::Arrive, false),
+            Act::Replay => (shown, mode, started) = (0, render::arrive(&talk, n), false),
             Act::Live => live(&mut s, &talk, slide, font.as_ref(), &enter),
             Act::Overview => {
                 if let Some(k) = render::overview(&mut s, &talk, n) {
@@ -324,7 +354,7 @@ fn present(args: &[String]) -> Result<(), String> {
                 }
             }
             Act::Next if shown < steps => (shown, mode) = (shown + 1, Mode::Step),
-            Act::Next if n < last => (n, shown, mode) = (n + 1, 0, Mode::Arrive),
+            Act::Next if n < last => (n, shown, mode) = (n + 1, 0, render::arrive(&talk, n + 1)),
             _ => {}
         }
     }

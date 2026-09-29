@@ -101,6 +101,7 @@ fn wrap(t: &str, w: usize) -> Vec<String> {
 /// The step's text, or the slide's.
 fn what(slide: &Slide, step: Option<usize>) -> String {
     match step {
+        Some(k) if slide.run.as_ref().is_some_and(|r| r.step == k) => "▶ runs the code".into(),
         Some(k) => slide.body.iter().filter(|b| b.step == k).map(|b| markup::text(&b.line).trim().to_string()).collect::<Vec<_>>().join(" "),
         None => slide.title(),
     }
