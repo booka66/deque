@@ -23,7 +23,7 @@ deque TALK --print    print every slide
 deque TALK --tv       fullscreen in a new Ghostty window (macOS)
 deque TALK --cast F   record it played through, as an asciinema cast
 deque TALK --html F   the same, as one page to post after the talk
-deque TALK --share    stream it live on the network, for anyone who can't see
+deque TALK --share    stream it live, a link for anyone who can't see; they can react and vote
 deque TALK --rehearse a practice run: each slide's time written into the talk
 deque notes TALK      speaker notes and timer; drives the talk
 deque check TALK      report problems, and slides cut off at 80x24 (--size WxH)
@@ -81,6 +81,7 @@ caption
 | ```` ```ts focus: 2\|4-5 ```` | on each step, those lines lit, the rest dim |
 | ```` ```chart ```` | lines of `label value`: bars that grow in |
 | ```` ```graph ```` | lines of `a -> b -> c`: boxes and arrows, laid out for you |
+| ```` ```poll ```` | a choice a line: with `--share`, watchers vote and the bars grow as they do |
 | `\| a \| b \|` | a table; a `\|---\|` row under the first makes it a header |
 | `![label](file)` | picture; side by side on one line |
 | `// text` | speaker note |
@@ -139,15 +140,21 @@ Options before the first `---` are defaults. Colors: `accent` `muted` `good` `ba
 
 ## Watching along
 
-With `--share`, anyone on the same network can follow the talk live in a browser, animations and pointer included. Press `w` to show them how: a QR code and the link, over the slide. A slide can say `${DEQUE_URL}`.
+With `--share`, anyone you give the link to can follow the talk live in a browser, animations and pointer included. Press `w` to show them how: a QR code and the link, over the slide. A slide can say `${DEQUE_URL}`.
 
-The link is HTTPS, with a certificate deque makes for the run: browsers warn once (it's signed by nobody), then the stream is encrypted. It carries a random token; without it there's nothing to see. Watchers get only what drawing needs (text, cursor moves, colors), never anything that would change their terminal, and can't send anything back.
+The link works from anywhere, with no browser warning: deque opens a Cloudflare quick tunnel (`brew install cloudflared`; no account) and waits till the link can be found before the talk starts, a few seconds. It closes when deque does. The link's secret, a random token in it, but anyone it's passed to can watch, from anywhere, and the talk goes through Cloudflare on its way. A watcher on the same network as you gets the talk straight from your machine instead: the page, once it's loaded, connects to your laptop directly (WebRTC), in a second or so, as quick as the network. It's encrypted, and the page checks it's talking to your deque by a fingerprint it got over the trusted link. Watchers elsewhere, or on a network that keeps devices apart (some guest Wi-Fi does), stay on the tunnel, a few tens of milliseconds behind. Your phone remote does the same the other way: on your network, where you point goes straight to your laptop.
+
+`--share-local` keeps it to this network, never through Cloudflare: for a venue with no internet, or a talk that mustn't leave the room. `--share` falls back to it, and says so on `w`'s card, when it can't open a tunnel (no `cloudflared`, or no internet).
+
+The page has a row of emoji under the talk: a tap sends one floating up the right of the screen, for everyone (not with `--calm`). On a slide with a ```` ```poll ````, it has the choices too: a tap votes, a second tap on another changes the vote, and the bars on the screen move as the votes come in. The slide's headline is the question. Votes are kept while deque runs, so going back to a poll shows how it stood.
+
+With `--share-local`, the link is HTTPS with a certificate deque makes for the run: browsers warn once (it's signed by nobody), then the stream is encrypted. Either way it carries a random token; without it there's nothing to see. Watchers get only what drawing needs (text, cursor moves, colors), never anything that would change their terminal. What they send back is only a number: which emoji, or which choice. No words of theirs reach the screen, and only so many reactions show at once.
 
 The page draws in your terminal's font: the file its config names (Ghostty, kitty) or `DEQUE_FACE`, sent to watchers' browsers. `--share-no-font` keeps it on your machine; check your font's license allows serving it.
 
 With `--share`, `P` (capital) shows a QR code for your phone: a remote with next and back, your notes, a timer, and a big red **hold to point** button. Hold it and aim the phone: the pointer shows on the screen, starting in the middle, and follows the phone as it turns; let go and it's gone, like a laser pointer. There's nothing to set up and nothing drifts: it goes by how the phone turns, not where it points, however you hold it or roll your wrist; if it's off, turn past the edge and it catches up, as a mouse does. A quick press is a ring; **speed** sets how far a turn goes. On an iPhone, the first tap asks to use the phone's motion. The page doesn't zoom, stays upright however the phone turns (locked to portrait where the browser lets it), and keeps the phone awake. The remote only works over HTTPS. It has its own link, apart from the watching one, and `deque notes` shows it too. Show it before the room's watching: anyone who scans it can drive the talk.
 
-`--share-curl` also offers `curl -skN …` to watch in a terminal (`${DEQUE_WATCH}`). `-k` takes the unsigned certificate, so whoever's on the network between could still write to that terminal: use it on networks you trust. Pictures don't reach watchers.
+`--share-curl` also offers `curl -skN …` to watch in a terminal, on your network (`${DEQUE_WATCH}`). `-k` takes the unsigned certificate, so whoever's on the network between could still write to that terminal: use it on networks you trust. Pictures don't reach watchers.
 
 ## Images
 

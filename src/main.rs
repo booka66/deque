@@ -20,6 +20,7 @@ mod rehearse;
 mod relay;
 mod render;
 mod replay;
+mod rtc;
 mod run;
 mod screen;
 mod share;
@@ -67,15 +68,22 @@ deque: slides in your terminal
   --rehearse              present it as a practice run: when it's over, the
                           time you spent on each slide is written into the
                           talk as its time:, for deque notes to pace you by
-  --share                 stream it live on the network, for anyone who can't
-                          see, in a browser, over HTTPS (browsers warn once:
-                          the certificate is deque's own): w shows the link
+  --share                 stream it live, for anyone who can't see, in a
+                          browser: a link that works from anywhere, through a
+                          Cloudflare tunnel (cloudflared), with no browser
+                          warning; on your network, straight from this
+                          machine. Watchers react and vote. w shows the link
                           and a QR code; a slide can say ${DEQUE_URL}
-  --share-curl            --share, and offer curl -sN to watch in a terminal
-                          too; plain HTTP, so for networks you trust
                           P shows your phone remote: next, back, notes, and a
                           pointer, by finger or by aiming the phone; just for
                           you, not the room
+  --share-local           --share, on this network only, not through
+                          Cloudflare: for no internet, or a talk that mustn't
+                          leave the room (browsers warn once: the certificate
+                          is deque's own). --share falls back to it when it
+                          can't open a tunnel
+  --share-curl            --share, and offer curl -sN to watch in a terminal
+                          on this network too
   --share-no-font         --share, but the page draws in its own monospace,
                           not the terminal's font (DEQUE_FACE, or its config)
 
@@ -266,6 +274,7 @@ fn stamps(p: &Path, talk: &Talk) -> Vec<Option<SystemTime>> {
 fn present(args: &[String]) -> Result<(), String> {
     let mut path: Option<PathBuf> = None;
     let (mut start, mut print, mut tv, mut cursor, mut sharing, mut curl) = (1usize, false, false, None, false, false);
+    let mut local = false;
     let mut own_font = true;
     let (mut calm, mut practice) = (false, false);
     let (mut cast, mut html, mut size) = (None, None, (100, 30));
@@ -285,6 +294,7 @@ fn present(args: &[String]) -> Result<(), String> {
             "--rehearse" => practice = true,
             "--share-curl" => (sharing, curl) = (true, true),
             "--share-no-font" => (sharing, own_font) = (true, false),
+            "--share-local" => (sharing, local) = (true, true),
             _ if a.starts_with('-') => return Err(format!("deque: no option {a}\n\n{HELP}\n")),
             _ if path.is_none() => {
                 path = Some(talk_at(a)?);
@@ -301,7 +311,17 @@ fn present(args: &[String]) -> Result<(), String> {
     let path = path.or_else(|| found(Path::new("."))).ok_or(format!("{HELP}\n"))?;
     // Before the talk's read, so its slides can say where to watch.
     let share = match sharing && !tv && !print {
-        true => Some(share::start(&markup::Theme::default(), curl, fine::face().filter(|_| own_font))?),
+        true => {
+            if !local {
+                eprintln!("deque: opening a link, through Cloudflare…");
+            }
+            let sh = share::start(&markup::Theme::default(), curl, fine::face().filter(|_| own_font), !local)?;
+            if let Some(why) = &sh.local {
+                eprintln!("deque: sharing on this network only: {why}");
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Some(sh)
+        }
         false => None,
     };
     if let Some(sh) = &share {
@@ -348,6 +368,7 @@ fn present(args: &[String]) -> Result<(), String> {
     let term_bg = images::background();
     adopt(&mut talk, term_bg, calm);
     s.theme = talk.theme.clone();
+    s.calm = talk.calm;
     s.kitty = proto == images::Proto::Kitty;
     // Watchers can't be sent pictures of moving text; with them, it smears.
     if s.kitty && share.is_none() {
@@ -408,6 +429,15 @@ fn present(args: &[String]) -> Result<(), String> {
             (on, since) = (n, Instant::now());
         }
         s.hurry = false;
+        // Its poll open to watchers, its bars as they've voted.
+        if let Some(sh) = &share {
+            let p = poll_of(&talk, n);
+            if let Some(p) = &p {
+                let votes = sh.hub.tally(p);
+                talk.slides[n].tally(&votes, talk.theme.accent, talk.theme.muted);
+            }
+            sh.hub.poll(p);
+        }
         let slide = &talk.slides[n];
         if hold {
             hold = false;
@@ -495,6 +525,18 @@ fn present(args: &[String]) -> Result<(), String> {
                 s.sky_frame();
                 s.flush();
                 s.steer();
+                // Votes in: the poll's bars grow to them.
+                if let Some(sh) = &share
+                    && sh.hub.voted()
+                    && let Some(p) = poll_of(&talk, n)
+                {
+                    let votes = sh.hub.tally(&p);
+                    let before = talk.slides[n].tally(&votes, talk.theme.accent, talk.theme.muted);
+                    if !small {
+                        render::tallied(&mut s, &talk, n, &before);
+                        s.flush();
+                    }
+                }
                 if let Some(c) = link.take().or_else(|| share.as_ref().and_then(|sh| sh.hub.take())) {
                     break match c.split_once(' ') {
                         Some(("goto", k)) => k.parse().map_or(Act::Redraw, Act::Goto),
@@ -527,6 +569,7 @@ fn present(args: &[String]) -> Result<(), String> {
                                 sh.hub.theme(&talk.theme);
                             }
                             s.theme = talk.theme.clone();
+                            s.calm = talk.calm;
                             problem = None;
                             n = edited.unwrap_or(n).min(talk.slides.len() - 1);
                             shown = if edited.is_some() { talk.slides[n].steps() } else { shown.min(talk.slides[n].steps()) };
@@ -625,7 +668,7 @@ fn present(args: &[String]) -> Result<(), String> {
             }
             Act::Watch => {
                 if let Some(sh) = &share {
-                    render::watch(&mut s, &talk, n, &sh.url, sh.curl.as_deref());
+                    render::watch(&mut s, &talk, n, &sh.url, sh.curl.as_deref(), sh.local.as_deref());
                 }
             }
             Act::Remote => {
@@ -807,6 +850,13 @@ fn state(talk: &Talk, n: usize, shown: usize, s: &Screen) -> String {
         "h": s.h,
     })
     .to_string()
+}
+
+/// Slide n's poll, as watchers are asked it: its headline, or what it's
+/// called, and its choices.
+fn poll_of(talk: &Talk, n: usize) -> Option<share::Poll> {
+    let s = &talk.slides[n];
+    s.poll.as_ref().map(|p| share::Poll { id: p.id.clone(), question: s.title(), choices: p.choices.clone() })
 }
 
 /// The terminal's background for the talk's, unless the talk set its own;
