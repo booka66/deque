@@ -44,6 +44,15 @@ pub const XTERM_CSS: &str = "sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
 
+/// What the remote did where it pointed: moved there, tapped for a ring,
+/// or let go, the pointer out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Touch {
+    Point,
+    Tap,
+    Lift,
+}
+
 struct Inner {
     viewers: Mutex<Vec<SyncSender<Arc<[u8]>>>>,
     /// Someone new is watching: the slide wants drawing again, whole.
@@ -61,9 +70,9 @@ struct Inner {
     remote: String,
     /// What the remote asked for, for the talk to do: next, back, …
     cmds: Mutex<Vec<String>>,
-    /// Where the remote's finger is, as fractions of the screen, and
-    /// whether it tapped.
-    points: Mutex<Vec<(f64, f64, bool)>>,
+    /// Where the remote's pointing, as fractions of the screen, and what
+    /// it did there.
+    points: Mutex<Vec<(f64, f64, Touch)>>,
     /// Where the talk is, as JSON, for the remote to show.
     state: Mutex<String>,
     /// The terminal's font, for the page to draw in, and its type.
@@ -112,7 +121,7 @@ impl Hub {
     }
 
     /// Where the remote pointed, and tapped, since last asked.
-    pub fn points(&self) -> Vec<(f64, f64, bool)> {
+    pub fn points(&self) -> Vec<(f64, f64, Touch)> {
         std::mem::take(&mut *self.0.points.lock().unwrap())
     }
 
@@ -356,13 +365,22 @@ fn control(c: &mut impl Write, hub: &Hub, method: &str, rest: &str) -> bool {
             drop(q);
             ok(c)
         }
+        ("post", ["lift"]) => {
+            let mut q = hub.0.points.lock().unwrap();
+            if q.len() >= 64 {
+                q.remove(0);
+            }
+            q.push((0.0, 0.0, Touch::Lift));
+            drop(q);
+            ok(c)
+        }
         ("post", [kind @ ("point" | "tap"), x, y]) => match (x.parse::<f64>(), y.parse::<f64>()) {
             (Ok(x), Ok(y)) if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) => {
                 let mut q = hub.0.points.lock().unwrap();
                 if q.len() >= 64 {
                     q.remove(0);
                 }
-                q.push((x, y, *kind == "tap"));
+                q.push((x, y, if *kind == "tap" { Touch::Tap } else { Touch::Point }));
                 drop(q);
                 ok(c)
             }
@@ -372,8 +390,8 @@ fn control(c: &mut impl Write, hub: &Hub, method: &str, rest: &str) -> bool {
     }
 }
 
-/// The remote: where the talk is, the notes, next and back, and a pad
-/// the screen's shape to point with.
+/// The remote: where the talk is, the notes, next and back, and a
+/// button to hold to point.
 fn remote_page(token: &str) -> String {
     r##"<!doctype html>
 <meta charset="utf-8">
@@ -393,16 +411,16 @@ body{position:fixed;inset:0}
 #title{font-weight:bold;color:#fabd2f;font-size:20px}
 #notes{flex:1;overflow:auto;white-space:pre-wrap;line-height:1.4;min-height:60px;touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 #next{color:#928374}
-#pad{position:relative;flex:none;width:100%;border:1px solid #504945;border-radius:10px;touch-action:none;background:#282828;overflow:hidden}
-#pad.held{border-color:#fb4934;background:#2e2626}
-#label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#665c54;font-size:14px;text-align:center;padding:8px;pointer-events:none}
-#dot{position:absolute;width:12px;height:12px;border-radius:6px;background:#fb4934;transform:translate(-6px,-6px);display:none;box-shadow:0 0 12px #fb4934;pointer-events:none}
-#aimrow,#keys{display:flex;gap:10px}
+#laser{flex:none;height:min(34vh,260px);width:100%;border:2px solid #fb4934;border-radius:18px;touch-action:none;background:#2a2020;color:#fb4934;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;font-size:24px;font-weight:bold;transition:background .08s,box-shadow .08s}
+#laser small{font-size:13px;font-weight:normal;color:#928374}
+#laser.on{background:#fb4934;color:#1d2021;box-shadow:0 0 40px #fb4934aa}
+#laser.on small{color:#1d2021}
+#keys{display:flex;gap:10px}
+#speed{flex:none;align-self:flex-end;font-size:13px;padding:6px 12px;border-radius:8px;background:none;color:#928374;border:1px solid #504945}
 button{flex:1;font:inherit;font-size:22px;padding:22px 0;border:0;border-radius:12px;background:#3c3836;color:#ebdbb2;touch-action:manipulation}
 button:active{filter:brightness(1.3)}
 #go{flex:2;background:#fabd2f;color:#1d2021;font-weight:bold}
 .small{font-size:16px;padding:12px 0}
-#aim.on{background:#fb4934;color:#1d2021}
 #hint{color:#928374;font-size:13px;min-height:1em}
 </style>
 <div id="app">
@@ -410,9 +428,9 @@ button:active{filter:brightness(1.3)}
 <div id="title"></div>
 <div id="notes"></div>
 <div id="next"></div>
-<div id="pad"><div id="label"></div><div id="dot"></div></div>
-<div id="aimrow"><button id="aim" class="small">point with the phone</button><button id="speed" class="small" hidden></button></div>
 <div id="hint"></div>
+<button id="speed"></button>
+<div id="laser">hold to point<small>aim the phone at the screen</small></div>
 <div id="keys"><button id="back">back</button><button id="go">next</button></div>
 </div>
 <script src="/TOKEN/remote.js"></script>
@@ -464,7 +482,6 @@ function orient() {
   app.style.width = (turn ? innerHeight : innerWidth) + "px";
   app.style.height = (turn ? innerWidth : innerHeight) + "px";
   app.style.transform = `translate(-50%, -50%) rotate(${-turn}deg)`;
-  size();
 }
 addEventListener("resize", orient);
 addEventListener("orientationchange", () => setTimeout(orient, 50));
@@ -508,7 +525,7 @@ async function poll() {
     const notes = (s.notes || []).join("\n");
     if ($("notes").textContent !== notes) { $("notes").textContent = notes; $("notes").scrollTop = 0; }
     $("next").textContent = s.next ? "next · " + s.next : "the end";
-    if (s.w && s.h && Math.abs(aspect - s.w / (s.h * 2)) > 0.01) { aspect = s.w / (s.h * 2); size(); }
+    if (s.w && s.h) aspect = s.w / (s.h * 2);
   } catch (e) {
     if (++misses > 1) {
       $("where").classList.add("off");
@@ -517,100 +534,61 @@ async function poll() {
   }
   setTimeout(poll, 600);
 }
-function size() {
-  const pad = $("pad");
-  pad.style.height = Math.min(pad.clientWidth / aspect, $("app").clientHeight * 0.4) + "px";
-}
 setInterval(() => {
   const e = Math.floor((Date.now() - started) / 1000);
   $("clock").textContent = Math.floor(e / 60) + ":" + String(e % 60).padStart(2, "0");
 }, 1000);
 
-// Where the pointer is, as fractions of the screen, and sending it: as
-// often as the last one's answered, at most 30 a second.
+// The laser: held, the pointer's on the screen and moves as the phone
+// turns, from the middle (or from where it was, let go of only just now);
+// let go, it's out. A quick press is a ring. Nothing to set up and nothing
+// to drift: it goes by how the phone turns, not where it points, so if
+// it's off, turn past the edge and it catches up, as a mouse does.
 let pos = [0.5, 0.5], sending = false, lastSent = 0;
-function dot() {
-  const p = $("pad");
-  $("dot").style.display = "block";
-  $("dot").style.left = pos[0] * p.clientWidth + "px";
-  $("dot").style.top = pos[1] * p.clientHeight + "px";
-}
+let holding = false, heldAt = 0, lastUp = 0, travelled = 0, ready = false;
 function point(force) {
-  dot();
   const now = Date.now();
   if (!force && (sending || now - lastSent < 33)) return;
   lastSent = now;
   sending = true;
   post(`point/${pos[0].toFixed(4)}/${pos[1].toFixed(4)}`).finally(() => (sending = false));
 }
-function ring() { buzz(); post(`tap/${pos[0].toFixed(4)}/${pos[1].toFixed(4)}`); }
-
-// A place on the pad, from a place on the page, the page turned or not.
-function padAt(t) {
-  const r = $("pad").getBoundingClientRect();
-  const u = (t.clientX - r.left) / r.width, v = (t.clientY - r.top) / r.height;
-  const [x, y] = turn === 90 ? [1 - v, u] : turn === 270 ? [v, 1 - u] : [u, v];
-  return [clamp(x), clamp(y)];
-}
-
-// Two ways to point. By finger: the pad is the screen, the pointer where
-// the finger is. By the phone, like a presenter's clicker: hold the pad
-// and the pointer moves as the phone turns, from the middle, or from where
-// it was if you only just let go; it never needs setting up, and if it's
-// off, push it to the edge and it catches up, as a mouse does. A finger
-// sliding meanwhile nudges it.
-let motion = false, holding = false, heldAt = 0, lastUp = 0, travelled = 0, from = null;
 const SPEEDS = [["slow", 50], ["medium", 32], ["fast", 20]];
 let speed = Math.min(2, Math.max(0, parseInt(store.get("deque-speed") || "1", 10) || 0));
-function label() {
-  $("label").textContent = motion ? "hold here and point the phone · tap for a ring" : "drag to point · tap for a ring";
-  $("speed").textContent = "speed: " + SPEEDS[speed][0];
-  $("speed").hidden = !motion;
-  $("aim").classList.toggle("on", motion);
-  $("aim").textContent = motion ? "pointing with the phone" : "point with the phone";
-}
+function label() { $("speed").textContent = "speed: " + SPEEDS[speed][0]; }
 $("speed").onclick = () => { speed = (speed + 1) % SPEEDS.length; store.set("deque-speed", speed); label(); };
 
-const pad = $("pad");
-pad.addEventListener("touchstart", e => {
+const laser = $("laser");
+function press(e) {
   e.preventDefault();
-  const t = e.touches[0];
-  from = padAt(t);
-  travelled = 0;
+  if (!ready || holding) return;
+  holding = true;
   heldAt = Date.now();
-  if (motion) {
-    holding = true;
-    pad.classList.add("held");
-    if (Date.now() - lastUp > 1500) pos = [0.5, 0.5];
-  } else {
-    pos = from;
-  }
+  travelled = 0;
+  if (heldAt - lastUp > 1500) pos = [0.5, 0.5];
+  laser.classList.add("on");
+  buzz();
   point(true);
-}, {passive: false});
-pad.addEventListener("touchmove", e => {
-  e.preventDefault();
-  const at = padAt(e.touches[0]);
-  if (motion) {
-    pos = [clamp(pos[0] + at[0] - from[0]), clamp(pos[1] + at[1] - from[1])];
-  } else {
-    pos = at;
-  }
-  travelled += Math.abs(at[0] - from[0]) + Math.abs(at[1] - from[1]);
-  from = at;
-  point();
-}, {passive: false});
-function up(e) {
-  e.preventDefault();
-  if (holding) { holding = false; lastUp = Date.now(); pad.classList.remove("held"); }
-  if (Date.now() - heldAt < 350 && travelled < 0.03) ring();
-  else point(true);
 }
-pad.addEventListener("touchend", up, {passive: false});
-pad.addEventListener("touchcancel", up, {passive: false});
-// With a mouse, for trying it on a laptop.
-pad.addEventListener("mousemove", e => { if (e.buttons && !motion) { pos = padAt(e); point(); } });
-pad.addEventListener("click", e => { if (!motion) { pos = padAt(e); ring(); } });
-// Held still, the pointer's said again, so it doesn't fade on the screen.
+function release(e) {
+  e.preventDefault();
+  if (!ready) { enable(); return; }
+  if (!holding) return;
+  holding = false;
+  lastUp = Date.now();
+  laser.classList.remove("on");
+  if (lastUp - heldAt < 250 && travelled < 0.02) post(`tap/${pos[0].toFixed(4)}/${pos[1].toFixed(4)}`);
+  post("lift", true);
+}
+laser.addEventListener("touchstart", press, {passive: false});
+laser.addEventListener("touchend", release, {passive: false});
+laser.addEventListener("touchcancel", release, {passive: false});
+laser.addEventListener("mousedown", press);
+addEventListener("mouseup", e => { if (holding) release(e); });
+// Leaving the page, or the phone locking, lets go.
+document.addEventListener("visibilitychange", () => { if (document.hidden && holding) release(new Event("x")); });
+addEventListener("blur", () => { if (holding) release(new Event("x")); });
+// Held still, the pointer's said again, so it stays lit on the screen.
 setInterval(() => { if (holding) point(true); }, 400);
 
 // Which way is up, in the phone's own axes, from its tilt; and the phone
@@ -648,42 +626,37 @@ function spin(e) {
   point();
 }
 
-async function allowed() {
-  // iPhones ask first, and only on a tap.
-  for (const E of [window.DeviceMotionEvent, window.DeviceOrientationEvent]) {
-    if (E && typeof E.requestPermission === "function") {
-      try { if ((await E.requestPermission()) !== "granted") return false; } catch (e) { return false; }
-    }
-  }
-  return true;
-}
+// The motion sensors: iPhones ask first, and only on a tap, so the first
+// tap of the button asks; everywhere else they're just on.
 function start() {
   addEventListener("devicemotion", spin);
   addEventListener("deviceorientation", tilt);
-  motion = true;
-  store.set("deque-aim", "phone");
+  ready = true;
   $("hint").textContent = "";
-  label();
 }
-$("aim").onclick = async () => {
-  if (motion) {
-    removeEventListener("devicemotion", spin);
-    removeEventListener("deviceorientation", tilt);
-    motion = false;
-    store.set("deque-aim", "finger");
-    label();
-    return;
+function asks() {
+  return [window.DeviceMotionEvent, window.DeviceOrientationEvent].some(E => E && typeof E.requestPermission === "function");
+}
+async function enable() {
+  if (!window.isSecureContext) { $("hint").textContent = "pointing needs the https link"; return; }
+  for (const E of [window.DeviceMotionEvent, window.DeviceOrientationEvent]) {
+    if (E && typeof E.requestPermission === "function") {
+      try {
+        if ((await E.requestPermission()) !== "granted") throw 0;
+      } catch (e) {
+        $("hint").textContent = "motion wasn't allowed: Settings › Apps › Safari › Motion & Orientation Access, then reload";
+        return;
+      }
+    }
   }
-  if (!window.isSecureContext) { $("hint").textContent = "pointing with the phone needs the https link"; return; }
-  if (!window.DeviceMotionEvent) { $("hint").textContent = "this browser can't tell how the phone moves"; return; }
-  if (!(await allowed())) { $("hint").textContent = "motion wasn't allowed: Settings › Safari › Motion & Orientation Access"; return; }
   start();
-};
-// Pointing with the phone last time: again, where no tap's needed to ask.
-if (store.get("deque-aim") === "phone" && window.isSecureContext && window.DeviceMotionEvent) {
-  if (typeof DeviceMotionEvent.requestPermission === "function") $("hint").textContent = "tap “point with the phone” to point with it again";
-  else start();
+  $("hint").textContent = "ready: hold the red button and aim";
+  setTimeout(() => { if ($("hint").textContent.startsWith("ready")) $("hint").textContent = ""; }, 3000);
 }
+if (!window.isSecureContext) $("hint").textContent = "pointing needs the https link";
+else if (!window.DeviceMotionEvent) $("hint").textContent = "this browser can't tell how the phone moves";
+else if (asks()) $("hint").textContent = "tap the red button once to let it use the phone's motion";
+else start();
 
 label();
 orient();
@@ -1035,13 +1008,14 @@ mod tests {
                 post(&format!("/{remote}/do/next")),
                 post(&format!("/{remote}/point/0.5/0.25")),
                 post(&format!("/{remote}/do/back")),
+                post(&format!("/{remote}/lift")),
             ],
         );
-        assert_eq!(got, ["http/1.1 204 no content"; 3]);
+        assert_eq!(got, ["http/1.1 204 no content"; 4]);
         assert_eq!(tls(&port, &[post(&format!("/{watch}/do/next"))]), ["http/1.1 404 not found"]);
         assert_eq!(share.hub.take().as_deref(), Some("next"));
         assert_eq!(share.hub.take().as_deref(), Some("back"));
-        assert_eq!(share.hub.points(), [(0.5, 0.25, false)]);
+        assert_eq!(share.hub.points(), [(0.5, 0.25, Touch::Point), (0.0, 0.0, Touch::Lift)]);
         assert_eq!(tls(&port, &[post(&format!("/{remote}/tap/2/0.25"))]), ["http/1.1 404 not found"]);
         // Watching works either way.
         assert!(all(get(&port, &format!("/{watch}"), "Mozilla")).starts_with("HTTP/1.1 200"));

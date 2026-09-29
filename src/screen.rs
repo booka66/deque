@@ -190,9 +190,25 @@ impl Screen {
     /// Where the phone remote pointed, and tapped, as the mouse would.
     pub fn steer(&mut self) {
         let Some(h) = self.tap.clone() else { return };
-        for (x, y, tap) in h.points() {
+        for (x, y, t) in h.points() {
             let (row, col) = ((y * (self.h - 1) as f64).round() as i32 + 1, (x * (self.w - 1) as f64).round() as i32 + 1);
-            if tap { self.click(row, col) } else { self.point(row, col) }
+            match t {
+                crate::share::Touch::Point => self.point(row, col),
+                crate::share::Touch::Tap => self.click(row, col),
+                crate::share::Touch::Lift => self.lift(),
+            }
+        }
+    }
+
+    /// The remote let go: the pointer out at once, its trail with it.
+    pub fn lift(&mut self) {
+        let now = self.now();
+        if let Some(sky) = self.sky.as_mut() {
+            // As if it had stopped long enough ago to be all but faded.
+            if let Some((x, y, _)) = sky.pointer {
+                sky.pointer = Some((x, y, now - 1.9));
+            }
+            sky.trail.clear();
         }
     }
 
