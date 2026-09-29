@@ -24,6 +24,7 @@ deque TALK --tv       fullscreen in a new Ghostty window (macOS)
 deque TALK --cast F   record it played through, as an asciinema cast
 deque TALK --html F   the same, as one page to post after the talk
 deque TALK --share    stream it live on the network, for anyone who can't see
+deque TALK --rehearse a practice run: each slide's time written into the talk
 deque notes TALK      speaker notes and timer; drives the talk
 deque check TALK      report problems, and slides cut off at 80x24 (--size WxH)
 deque lsp             language server
@@ -76,8 +77,10 @@ caption
 | ```` ``` ```` | column-aligned block; ```` ```lang ```` highlights code |
 | ```` ```sh run ```` | code that runs on a step, its output under it |
 | ```` ```ts src/a.ts#fee ```` | code from a file: `path`, `path:10-24`, or `path#name` (that function) |
+| ```` ```ts src/a.ts#fee@HEAD~2 ```` | the same, as it was at a revision in git |
 | ```` ```ts focus: 2\|4-5 ```` | on each step, those lines lit, the rest dim |
 | ```` ```chart ```` | lines of `label value`: bars that grow in |
+| ```` ```graph ```` | lines of `a -> b -> c`: boxes and arrows, laid out for you |
 | `\| a \| b \|` | a table; a `\|---\|` row under the first makes it a header |
 | `![label](file)` | picture; side by side on one line |
 | `// text` | speaker note |
@@ -94,11 +97,14 @@ Inline: `**bold**` `` `code` `` `{accent}…{/}` `${ENV}`
 | `sky:` | `stars` `snow` `rain` `embers` `life` `boids` `fireflies` `none` |
 | `glow:` | `on` `off`: the headline lights what's around it |
 | `enter:` | command to run on enter |
+| `play:` | a recording (`.cast`) to play on enter instead |
 | `cols:` | columns while `enter:` runs, with `--tv` |
 | `draw:` | `WxH` canvas: `text` `center` `box` `arrow` `dotted` `clear` `step` |
 | `time:` | how long it's meant to be up (`90s`, `2m`); `deque notes` shows if you're ahead or behind |
 
 Code in the same language on slides in a row morphs: what's in both swings to its new place, the rest fades. A slide's own `tr:` turns that off. `tr: morph` does it to the whole slide: every word, and the headline's blocks flocking into the new headline.
+
+`play: demo.cast` plays a demo recorded beforehand (`asciinema rec demo.cast`) on enter, so it can't go wrong on the day: as it was recorded, long pauses cut short. It stops at the recording's markers (its `[time, "m", ""]` lines) for you to talk over; space pauses and goes on, `→` skips to the next marker, `q` stops. With an `enter:` too, enter cuts from the recording to the real thing, for questions. `deque check` warns when a recording is bigger than the screen.
 
 A `run` block runs in the talk's folder (`sh` `bash` `zsh` `fish` `py` `js` `rb`); a key stops it. Leave out the headline to give its output room.
 
@@ -109,6 +115,23 @@ A `sky:` moves the whole time the slide is up, drawn a quarter of a cell at a ti
 Headlines move a quarter of a cell at a time. In kitty and Ghostty, moving text goes as pictures in the terminal's own font, placed to the pixel; elsewhere it smears between cells. `DEQUE_FACE=path` picks the font, `DEQUE_SMOOTH=off` smears everywhere.
 
 Code from a file is read again when the file changes, and `deque check` says when the lines or the name aren't there.
+
+A ```` ```graph ```` is a diagram without placing anything: each line names boxes with arrows between them, `->`, or `..>` for a dotted one, and `: text` after the last labels that arrow. deque puts them in columns, left to right, each box one past the furthest box that points at it, and routes the arrows round the boxes, joined where they branch or meet (`├` `┬` `┼`); one that goes back, closing a loop, goes round outside everything. ```` ```graph down ```` lays it out top to bottom instead, for a narrow screen or a tall graph. A `> ` line comes in on a step, its new boxes traced in and its arrows drawn. Lines after the block are centered under it. The slide has a label, but no headline.
+
+````
+---
+## how a request goes
+```graph
+browser -> api: POST /order
+api -> db
+api -> cache: read
+> api ..> queue -> worker -> db
+```
+````
+
+`@REV` after it takes it as it was in git: a commit, branch or tag. On slides in a row, `a.ts#fee@main` then `a.ts#fee` morphs the old function into the new one, a change walked through a slide at a time.
+
+`--rehearse` is a practice run: present as you will on the day, and when you quit, the time you spent on each slide goes into the talk as its `time:` (to the nearest 5 seconds), a slide's own `time:` changed if it had one. `deque notes` then shows, on the day, whether you're ahead of your practice or behind it. Slides you didn't get to are left as they were.
 
 `--calm` (or `calm: on`) keeps still what needn't move: no skies, glow, flourishes, transitions or morphs; things fade in.
 
