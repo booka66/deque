@@ -17,21 +17,27 @@ Or `cargo install --git https://github.com/booka66/deque`.
 ## Use
 
 ```
+deque new NAME        write NAME.deque, a talk to start from
 deque TALK [N]        present, from slide N
 deque TALK --print    print every slide
 deque TALK --tv       fullscreen in a new Ghostty window (macOS)
 deque TALK --cast F   record it played through, as an asciinema cast
+deque TALK --html F   the same, as one page to post after the talk
 deque TALK --share    stream it live on the network, for anyone who can't see
 deque notes TALK      speaker notes and timer; drives the talk
-deque check TALK      report problems
+deque check TALK      report problems, and slides cut off at 80x24 (--size WxH)
 deque lsp             language server
 ```
 
+TALK can be a folder with a `talk.deque` in it, or left out when the folder you're in has one.
+
 The mouse is a laser pointer: a red dot with a glow that lights the text under it, a ring where you click, fading when it's still. The terminal's own arrow is hidden where it lets deque.
 
-Keys: `→` `space` `n` next · `←` `b` back · `12⏎` go to 12 · `o` overview · `r` replay · `q` quit
+Keys: `→` `space` `n` next · `←` `b` back · `12⏎` go to 12 · `'` back to where you jumped from · `o` overview (`/` finds a slide by its words or notes) · `r` replay · `B` or `.` blank to the sky, any key back · `?` every key · `q` `q` quit (one `q` could be a slip; `ctrl-c` quits at once)
 
-Saving the talk reloads it. `deque demo/talk.deque` shows every feature.
+Saving the talk reloads it. Starting again, `'` goes back to the slide you left off on. When the window's too small for a slide, deque says so over it rather than cutting it off. `deque demo/talk.deque` shows every feature.
+
+`--html` writes a page that plays the talk with `→` and `←`, a step at a time, animations included, scaled to the window. It loads xterm.js from jsDelivr (checked against its hash) and names your terminal's font rather than including it, so viewers who have it see it and the rest get a monospace.
 
 ## Format
 

@@ -29,10 +29,20 @@ pub fn label(s: &Screen, slide: &Slide, n: usize) -> Option<Line> {
     Some(markup::plain(&format!("{:02} · {}", n, spaced.join(" ")), s.muted()))
 }
 
-/// The screen empty but for the slides' dots along the bottom.
+/// The screen empty but for the slides' dots along the bottom, or, when
+/// they wouldn't fit, a bar as far along as the talk is.
 pub fn clear(s: &mut Screen, talk: &Talk, n: usize) {
     s.clear();
     let (acc, mut_) = (s.accent(), s.muted());
+    let total = talk.slides.len() as i32;
+    if total * 2 + 3 > s.w {
+        let w = (s.w / 2).max(4);
+        let done = ((n as i32 + 1) * w + total - 1) / total;
+        let mut d = markup::plain(&"━".repeat(done as usize), acc);
+        d.extend(markup::plain(&"─".repeat((w - done) as usize), mut_));
+        s.put(s.h - 1, s.mid(w), &d);
+        return;
+    }
     let mut d = Line::new();
     for i in 0..talk.slides.len() {
         let (ch, st) = if i < n { ('●', mut_) } else if i == n { ('●', acc) } else { ('·', mut_) };
@@ -615,18 +625,21 @@ pub struct Card<'a> {
     pub url: &'a str,
     pub extra: Vec<(&'a str, &'a str)>,
     pub copy: bool,
+    /// The lines under the heading in a block, lined up at its left, not
+    /// each centered: a table's columns.
+    pub table: bool,
 }
 
 pub fn watch(s: &mut Screen, talk: &Talk, n: usize, url: &str, cmd: Option<&str>) {
     let mut extra = vec![("open  ", url)];
     extra.extend(cmd.map(|c| ("or run  ", c)));
-    show_card(s, talk, n, Card { title: "can't see the screen? watch along", url, extra, copy: true });
+    show_card(s, talk, n, Card { title: "can't see the screen? watch along", url, extra, copy: true, table: false });
 }
 
 /// The remote's card: for the presenter's phone, not the room.
 pub fn remote(s: &mut Screen, talk: &Talk, n: usize, url: &str) {
     let extra = vec![("open  ", url), ("", ""), ("", "next, back, your notes, and a pointer"), ("", "just you: anyone who scans this can drive the talk")];
-    show_card(s, talk, n, Card { title: "your remote", url, extra, copy: false });
+    show_card(s, talk, n, Card { title: "your remote", url, extra, copy: false, table: false });
 }
 
 fn show_card(s: &mut Screen, talk: &Talk, n: usize, k: Card) {
@@ -712,7 +725,7 @@ fn clip(s: &mut Screen, text: &str) -> bool {
 }
 
 fn card(s: &mut Screen, k: &Card, copied: bool) {
-    let code = qr(k.url);
+    let code = if k.url.is_empty() { vec![] } else { qr(k.url) };
     let (acc, mt, fg) = (s.accent(), s.muted(), Style::fg(s.theme.fg));
     let mut lines: Vec<Line> = vec![markup::plain(k.title, Style { bold: true, ..acc }), vec![]];
     // The code only where it fits, with the words under it.
@@ -720,8 +733,9 @@ fn card(s: &mut Screen, k: &Card, copied: bool) {
         lines.extend(code);
         lines.push(vec![]);
     }
+    let key = if k.table { acc } else { mt };
     let mut row = |label: &str, what: &str| {
-        let mut l = markup::plain(label, mt);
+        let mut l = markup::plain(label, key);
         l.extend(markup::plain(what, fg));
         lines.push(l);
     };
@@ -733,8 +747,137 @@ fn card(s: &mut Screen, k: &Card, copied: bool) {
         lines.push(markup::plain("link copied", mt));
     }
     let top = ((s.h - lines.len() as i32) / 2).max(1);
+    let wide = lines.iter().skip(1).map(|l| markup::width(l)).max().unwrap_or(0);
     for (i, l) in lines.iter().enumerate() {
-        s.put(top + i as i32, s.mid(markup::width(l)), l);
+        let col = if k.table && i > 0 { s.mid(wide) } else { s.mid(markup::width(l)) };
+        s.put(top + i as i32, col, l);
+    }
+}
+
+/// What the keys do, on a card over the slide frosted, till a key.
+pub fn help(s: &mut Screen, talk: &Talk, n: usize) {
+    let keys = [
+        ("→ space n", "on"),
+        ("← b", "back a slide"),
+        ("12 enter", "slide 12"),
+        ("'", "back to where you jumped from"),
+        ("g G", "first, last"),
+        ("o", "every slide; / finds one"),
+        ("r", "play the slide again"),
+        ("enter", "run the slide's command"),
+        ("B .", "blank the screen"),
+        ("w P", "how to watch, your remote (--share)"),
+        ("+ −", "the font's size (--tv)"),
+        ("q q", "quit"),
+        ("", ""),
+        ("mouse", "a laser pointer; click for a ring"),
+    ];
+    let wide = keys.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let pad: Vec<String> = keys.iter().map(|(k, _)| format!("{k:>wide$}   ")).collect();
+    let extra = keys.iter().zip(&pad).map(|((_, what), k)| (k.as_str(), *what)).collect();
+    show_card(s, talk, n, Card { title: "keys", url: "", extra, copy: false, table: true });
+}
+
+/// The slide on a smaller screen than it needs: frosted, a card over it
+/// saying so, till the window's bigger or the slide changes.
+pub fn small(s: &mut Screen, talk: &Talk, n: usize, (w, h): (i32, i32)) {
+    s.raw("\x1b[?2026h");
+    behind(s, talk, n);
+    s.clear();
+    let lines = [
+        markup::plain("make me bigger", Style { bold: true, ..s.accent() }),
+        vec![],
+        markup::plain(&format!("this slide needs {w}×{h}; the window's {}×{}", s.w, s.h), s.muted()),
+    ];
+    let top = ((s.h - 3) / 2).max(1);
+    for (i, l) in lines.iter().enumerate() {
+        s.put(top + i as i32, s.mid(markup::width(l)).max(1), l);
+    }
+    s.raw("\x1b[?2026l");
+}
+
+/// What falls off a w×h screen of slide n shown whole: across, and down.
+fn clips(talk: &Talk, n: usize, w: i32, h: i32) -> (bool, bool) {
+    let slide = &talk.slides[n];
+    if !slide.images.is_empty() {
+        return (false, false);
+    }
+    let mut s = Screen::recording(talk.theme.clone(), w, h);
+    match &slide.draw {
+        Some(d) => drawn(&mut s, talk, n, d, Mode::Still, slide.steps()),
+        None => text(&mut s, talk, n, Mode::Still, slide.steps()),
+    }
+    s.clip
+}
+
+/// The smallest screen slide n fits, when it doesn't fit w×h.
+pub fn needs(talk: &Talk, n: usize, w: i32, h: i32) -> Option<(i32, i32)> {
+    if clips(talk, n, w, h) == (false, false) {
+        return None;
+    }
+    let nw = (w..=600).find(|&x| !clips(talk, n, x, h.max(300)).0).unwrap_or(600);
+    let nh = (h..=300).find(|&y| !clips(talk, n, nw, y).1).unwrap_or(300);
+    Some((nw, nh))
+}
+
+/// The screen blank but for its sky: the slide fading out to it, then, at
+/// a key, back in.
+pub fn blank(s: &mut Screen, talk: &Talk, n: usize, shown: usize) {
+    use crossterm::event::{self, Event, KeyEventKind};
+    use std::time::Duration;
+    let slide = &talk.slides[n];
+    s.keep();
+    match &slide.draw {
+        _ if !slide.images.is_empty() => s.clear(),
+        Some(d) => drawn(s, talk, n, d, Mode::Still, shown),
+        None => text(s, talk, n, Mode::Still, shown),
+    }
+    let cells = s.cells().to_vec();
+    fade(s, &cells, false);
+    s.clear();
+    s.flush();
+    if s.pending.take().is_none() {
+        loop {
+            if !event::poll(Duration::from_millis(15)).unwrap_or(false) {
+                s.sky_frame();
+                s.flush();
+                continue;
+            }
+            match event::read() {
+                Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => break,
+                Ok(Event::Resize(..)) => s.size(),
+                Ok(Event::Mouse(m)) => s.mouse(m),
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+    s.hurry = false;
+    if s.w as usize * s.h as usize == cells.len() {
+        fade(s, &cells, true);
+    }
+    s.thaw();
+}
+
+/// Cells kept from the screen fading into what's behind them, or out of it.
+fn fade(s: &mut Screen, cells: &[Option<Cell>], back: bool) {
+    let (frames, w) = (14, s.w);
+    for f in 1..=frames {
+        if s.hurry {
+            break;
+        }
+        let k = crate::screen::ease(f, frames);
+        let k = if back { k } else { 1.0 - k };
+        s.raw("\x1b[?2026h");
+        for (i, c) in cells.iter().enumerate() {
+            let Some(c) = c.filter(|c| c.ch != '\0') else { continue };
+            let (r, col) = (i as i32 / w + 1, i as i32 % w + 1);
+            let under = s.under(r, col);
+            let st = Style { fg: Some(under.mix(c.st.fg.unwrap_or(s.theme.fg), k)), bg: c.st.bg.map(|b| under.mix(b, k)), ..c.st };
+            s.put(r, col, &[Cell { ch: c.ch, st }]);
+        }
+        s.raw("\x1b[?2026l");
+        s.tick(0.022);
     }
 }
 
@@ -751,16 +894,22 @@ fn pick(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
     let total = talk.slides.len() as i32;
     let mut sel = now as i32;
     let mut shown = None;
+    // What's being looked for, after a /: the selection goes to the
+    // slides with it, and the rest go dim.
+    let mut find: Option<String> = None;
+    let hit = |k: i32, q: &str| matches(&talk.slides[k as usize], q);
+    // The next slide with it, from k on, going by step, round the end.
+    let seek = |k: i32, by: i32, q: &str| (0..total).map(|i| (k + by * i).rem_euclid(total)).find(|&i| hit(i, q));
     loop {
         let cw = 30.min(s.w - 2).max(8);
         let cols = ((s.w - 2) / cw).max(1);
         // Drawn again when the selection moves: the slide it's on, frosted
         // behind, then the list, in one frame.
-        if shown != Some((sel, s.w, s.h)) {
-            shown = Some((sel, s.w, s.h));
+        if shown != Some((sel, s.w, s.h, find.clone())) {
+            shown = Some((sel, s.w, s.h, find.clone()));
             s.raw("\x1b[?2026h");
             behind(s, talk, sel as usize);
-            list(s, talk, now, sel as usize, cw, cols);
+            list(s, talk, now, sel as usize, cw, cols, find.as_deref());
             s.raw("\x1b[?2026l");
             s.flush();
         }
@@ -772,7 +921,24 @@ fn pick(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
         }
         let Ok(ev) = event::read() else { return None };
         match ev {
+            Event::Key(k) if k.kind != KeyEventKind::Release && find.is_some() => {
+                let q = find.as_mut().unwrap();
+                match k.code {
+                    KeyCode::Esc => find = None,
+                    KeyCode::Enter => return Some(sel as usize),
+                    KeyCode::Backspace if q.is_empty() => find = None,
+                    KeyCode::Backspace => _ = q.pop(),
+                    KeyCode::Down | KeyCode::Right | KeyCode::Tab => sel = seek(sel + 1, 1, q).unwrap_or(sel),
+                    KeyCode::Up | KeyCode::Left | KeyCode::BackTab => sel = seek(sel - 1, -1, q).unwrap_or(sel),
+                    KeyCode::Char(c) => {
+                        q.push(c);
+                        sel = seek(sel, 1, q).unwrap_or(sel);
+                    }
+                    _ => {}
+                }
+            }
             Event::Key(k) if k.kind != KeyEventKind::Release => match k.code {
+                KeyCode::Char('/') => find = Some(String::new()),
                 KeyCode::Esc | KeyCode::Char('o' | 'q') | KeyCode::Tab => return None,
                 KeyCode::Enter | KeyCode::Char(' ') => return Some(sel as usize),
                 KeyCode::Right | KeyCode::Char('l') => sel += 1,
@@ -791,15 +957,33 @@ fn pick(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
     }
 }
 
-/// The slides in a grid, cw columns wide, scrolled so the selection shows.
-fn list(s: &mut Screen, talk: &Talk, now: usize, sel: usize, cw: i32, cols: i32) {
+/// Whether a slide has q in its title, its lines or its notes, whatever
+/// the case.
+fn matches(slide: &Slide, q: &str) -> bool {
+    let q = q.to_lowercase();
+    let has = |t: &str| t.to_lowercase().contains(&q);
+    has(&slide.title()) || slide.body.iter().any(|b| has(&markup::text(&b.line))) || slide.notes.iter().any(|n| has(n))
+}
+
+/// The slides in a grid, cw columns wide, scrolled so the selection shows;
+/// with a search, those without it dim.
+fn list(s: &mut Screen, talk: &Talk, now: usize, sel: usize, cw: i32, cols: i32, find: Option<&str>) {
     let total = talk.slides.len() as i32;
     let rows = (total + cols - 1) / cols;
     let fit = (s.h - 4).max(1);
     let top = ((sel as i32 / cols) - fit + 1).max(0).min((rows - fit).max(0));
     s.clear();
     let st = s.muted();
-    s.put_str(1, 2, "slides · arrows move · enter goes · esc back", st);
+    match find {
+        Some(q) => {
+            s.put_str(1, 2, "find ", st);
+            s.put_str(1, 7, &format!("{q}_"), s.accent());
+            let n = (0..talk.slides.len()).filter(|&i| matches(&talk.slides[i], q)).count();
+            let what = if q.is_empty() { String::new() } else { format!("   {n} found · ↓ ↑ next, back · enter goes · esc stops") };
+            s.put_str(1, 8 + q.chars().count() as i32, &what, st);
+        }
+        None => s.put_str(1, 2, "slides · arrows move · enter goes · / finds · esc back", st),
+    }
     for i in 0..total as usize {
         let (r, c) = (i as i32 / cols - top, i as i32 % cols);
         if r < 0 || r >= fit {
@@ -810,6 +994,8 @@ fn list(s: &mut Screen, talk: &Talk, now: usize, sel: usize, cw: i32, cols: i32)
         let text: String = text.chars().take((cw - 2) as usize).collect();
         let st = if i == sel {
             Style { fg: Some(s.theme.bg), bg: Some(s.theme.accent), bold: true }
+        } else if find.is_some_and(|q| !q.is_empty() && !matches(&talk.slides[i], q)) {
+            Style::fg(s.theme.bg.mix(s.theme.muted, 0.5))
         } else if i == now {
             s.accent()
         } else {
@@ -883,5 +1069,19 @@ pub fn focus(s: &mut Screen, talk: &Talk, n: usize, src: usize) {
     }
     for r in rows {
         s.put(r, 1, &[bar]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slide_too_wide_says_how_wide() {
+        let wide = "x".repeat(90);
+        let (talk, _) = crate::talk::parse(&format!("---\n# HI\n{wide}\n---\n# HI\nshort\n"), std::path::Path::new("."), false);
+        assert_eq!(needs(&talk, 0, 80, 24).map(|(w, _)| w), Some(90));
+        assert_eq!(needs(&talk, 1, 80, 24), None);
+        assert_eq!(needs(&talk, 0, 100, 24), None);
     }
 }

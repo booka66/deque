@@ -38,6 +38,17 @@ impl Link {
         write(&self.state, &format!("{n} {shown}"));
     }
 
+    /// The presenter: the slide it's on, kept after it quits, for the next
+    /// run to offer going back to.
+    pub fn remember(&self, n: usize) {
+        write(&self.state.with_extension("last"), &n.to_string());
+    }
+
+    /// Where the last run left off.
+    pub fn last(&self) -> Option<usize> {
+        std::fs::read_to_string(self.state.with_extension("last")).ok()?.trim().parse().ok()
+    }
+
     pub fn gone(&self) {
         let _ = std::fs::remove_file(&self.state);
         let _ = std::fs::remove_file(self.state.with_extension("remote"));

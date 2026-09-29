@@ -31,24 +31,31 @@ use screen::Screen;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use talk::{Diag, Talk};
 
 const HELP: &str = "\
 deque: slides in your terminal
 
-  deque TALK [N]       present TALK, from slide N
+  deque TALK [N]       present TALK, from slide N; TALK can be a folder
+                       with a talk.deque, or left out when there's one here
+  deque new NAME       write NAME.deque, a talk to start from
   deque TALK --print   every slide as text
   deque TALK --cast FILE [--size WxH]
                        record the talk played through as an asciinema
                        cast, 100x30 unless --size says; agg makes a GIF
+  deque TALK --html FILE [--size WxH]
+                       the same, as a page to post: → and ← step through
+                       it, animations and all
   deque TALK --tv      fullscreen in a new Ghostty window, the font sized for
                        the screen (macOS); + and − size it
   deque notes TALK     speaker notes, the next slide and a timer, for a
                        second screen; its keys drive the talk
   deque preview TALK   the slide an editor's cursor is in, still; see
                        the README for the Neovim plugin that runs it
-  deque check TALK     the talk's problems, if any
+  deque check TALK [--size WxH]
+                       the talk's problems, if any, and the slides cut off
+                       on a screen that size (80x24 unless it says)
   deque lsp            the language server, for editors
 
   --cursor, --no-cursor   show or hide the cursor (the talk's `cursor:` otherwise)
@@ -66,14 +73,17 @@ deque: slides in your terminal
   --share-no-font         --share, but the page draws in its own monospace,
                           not the terminal's font (DEQUE_FACE, or its config)
 
-keys: → space enter n on · ← b back · 12 enter: slide 12 · o all slides
-      r replay the slide · w how to watch (--share) · home end · q quit
+keys: → space enter n on · ← b back · 12 enter: slide 12 · ' back from a jump
+      o all slides, / to find one · r replay · B blank · w how to watch
+      (--share) · home end · q q quit · ? all of them
 the mouse is a laser pointer
 The talk reloads when you save it, and shows the slide you changed.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        // No talk named: the one here, if there's one.
+        None if found(Path::new(".")).is_some() => run(present(&[found(Path::new(".")).unwrap().to_string_lossy().into_owned()])),
         None | Some("-h" | "--help" | "help") => {
             println!("{HELP}");
             ExitCode::SUCCESS
@@ -82,8 +92,16 @@ fn main() -> ExitCode {
             println!("deque {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some("notes") => match args.get(1) {
-            Some(p) => match notes::run(Path::new(p), |p| load(p, true)) {
+        Some("new") => match args.get(1) {
+            Some(name) => run(new(name)),
+            None => {
+                eprintln!("usage: deque new NAME");
+                ExitCode::from(2)
+            }
+        },
+        Some("notes") => match args.get(1).map(|p| talk_at(p)) {
+            Some(Err(e)) => run(Err(e)),
+            Some(Ok(p)) => match notes::run(&p, |p| load(p, true)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprint!("{e}");
@@ -97,8 +115,9 @@ fn main() -> ExitCode {
         },
         Some("preview") => {
             let from = args.iter().position(|a| a == "--from").and_then(|i| args.get(i + 1)).map(Path::new);
-            match args.get(1).filter(|a| !a.starts_with('-')) {
-                Some(p) => match preview::run(Path::new(p), from, args.iter().any(|a| a == "--still")) {
+            match args.get(1).filter(|a| !a.starts_with('-')).map(|p| talk_at(p)) {
+                Some(Err(e)) => run(Err(e)),
+                Some(Ok(p)) => match preview::run(&p, from, args.iter().any(|a| a == "--still")) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
                         eprintln!("{e}");
@@ -115,28 +134,92 @@ fn main() -> ExitCode {
             lsp::run();
             ExitCode::SUCCESS
         }
-        Some("check") => match args.get(1) {
-            Some(p) => match load(Path::new(p), false) {
-                Ok(_) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprint!("{e}");
-                    ExitCode::FAILURE
-                }
-            },
-            None => {
-                eprintln!("usage: deque check TALK");
-                ExitCode::from(2)
-            }
-        },
-        _ => match present(&args) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprint!("{e}");
-                ExitCode::FAILURE
-            }
-        },
+        Some("check") => run(check(&args[1..])),
+        _ => run(present(&args)),
     }
 }
+
+fn run(r: Result<(), String>) -> ExitCode {
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprint!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The talk in a folder: its talk.deque, or its only .deque file.
+fn found(dir: &Path) -> Option<PathBuf> {
+    let t = dir.join("talk.deque");
+    if t.is_file() {
+        return Some(t);
+    }
+    let mut all = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "deque"));
+    let one = all.next()?;
+    all.next().is_none().then_some(one)
+}
+
+/// The talk a path means: the file, or the talk in the folder.
+fn talk_at(p: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(p);
+    if !p.is_dir() {
+        return Ok(p);
+    }
+    found(&p).ok_or(format!("deque: no talk in {}: a talk.deque, or one .deque file\n", p.display()))
+}
+
+/// deque check TALK [--size WxH]: its problems, and the slides that don't
+/// fit a screen that size, 80x24 unless it says.
+fn check(args: &[String]) -> Result<(), String> {
+    let (mut path, mut size) = (None, (80, 24));
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--size" => size = parse_size(it.next())?,
+            _ if a.starts_with('-') => return Err(format!("deque: no option {a}\nusage: deque check TALK [--size WxH]\n")),
+            _ => path = Some(talk_at(a)?),
+        }
+    }
+    let path = path.ok_or("usage: deque check TALK [--size WxH]\n")?;
+    let talk = load(&path, false)?;
+    let (w, h) = size;
+    for (n, slide) in talk.slides.iter().enumerate() {
+        if let Some((nw, nh)) = render::needs(&talk, n, w, h) {
+            eprintln!("{}:{}:1: warning: slide {} needs {nw}x{nh}, more than {w}x{h}: cut off on a screen that size", path.display(), slide.line + 1, n + 1);
+        }
+    }
+    Ok(())
+}
+
+fn parse_size(v: Option<&String>) -> Result<(i32, i32), String> {
+    let v = v.map(String::as_str).unwrap_or_default();
+    v.split_once('x')
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .filter(|&(w, h)| w >= 20 && h >= 10)
+        .ok_or(format!("deque: --size is WIDTHxHEIGHT, like 100x30, not \"{v}\"\n"))
+}
+
+/// deque new NAME: a talk to start from, NAME.deque, a slide of each of
+/// the things people reach for.
+fn new(name: &str) -> Result<(), String> {
+    let file = if name.ends_with(".deque") { PathBuf::from(name) } else { PathBuf::from(format!("{name}.deque")) };
+    if file.exists() {
+        return Err(format!("deque: {} is there already\n", file.display()));
+    }
+    let stem = file.file_stem().map(|s| s.to_string_lossy().to_uppercase()).unwrap_or_default();
+    let title = if (1..=10).contains(&stem.len()) && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { stem } else { "HELLO".into() };
+    std::fs::write(&file, STARTER.replace("{TITLE}", &title)).map_err(|e| format!("deque: {}: {e}\n", file.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755));
+    }
+    println!("{} written. present it:\n\n  deque {}\n\nit reloads as you save it; ? shows the keys", file.display(), file.display());
+    Ok(())
+}
+
+const STARTER: &str = include_str!("starter.deque");
 
 fn describe(path: &Path, diags: &[Diag]) -> String {
     diags
@@ -174,7 +257,7 @@ fn present(args: &[String]) -> Result<(), String> {
     let (mut start, mut print, mut tv, mut cursor, mut sharing, mut curl) = (1usize, false, false, None, false, false);
     let mut own_font = true;
     let mut calm = false;
-    let (mut cast, mut size) = (None, (100, 30));
+    let (mut cast, mut html, mut size) = (None, None, (100, 30));
     let mut rest = vec![];
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -182,14 +265,8 @@ fn present(args: &[String]) -> Result<(), String> {
             "--print" => print = true,
             "--tv" => tv = true,
             "--cast" => cast = Some(PathBuf::from(it.next().ok_or("deque: --cast FILE: the file to write\n")?)),
-            "--size" => {
-                let v = it.next().map(String::as_str).unwrap_or_default();
-                size = v
-                    .split_once('x')
-                    .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
-                    .filter(|&(w, h)| w >= 20 && h >= 10)
-                    .ok_or(format!("deque: --size is WIDTHxHEIGHT, like 100x30, not \"{v}\"\n"))?;
-            }
+            "--html" => html = Some(PathBuf::from(it.next().ok_or("deque: --html FILE: the page to write\n")?)),
+            "--size" => size = parse_size(it.next())?,
             "--cursor" => cursor = Some(true),
             "--no-cursor" => cursor = Some(false),
             "--share" => sharing = true,
@@ -197,7 +274,11 @@ fn present(args: &[String]) -> Result<(), String> {
             "--share-curl" => (sharing, curl) = (true, true),
             "--share-no-font" => (sharing, own_font) = (true, false),
             _ if a.starts_with('-') => return Err(format!("deque: no option {a}\n\n{HELP}\n")),
-            _ if path.is_none() => path = Some(PathBuf::from(a)),
+            _ if path.is_none() => {
+                path = Some(talk_at(a)?);
+                // Given again to the new window as the talk's file.
+                continue;
+            }
             _ => start = a.parse().map_err(|_| format!("deque: \"{a}\" isn't a slide number\n"))?,
         }
         if a != "--tv" {
@@ -226,9 +307,13 @@ fn present(args: &[String]) -> Result<(), String> {
     if let Some(file) = cast {
         return cast::record(&talk, &file, size.0, size.1);
     }
+    if let Some(file) = html {
+        cast::html(&talk, &file, size.0, size.1)?;
+        println!("{} written: open it in a browser; → and ← step through the talk", file.display());
+        return Ok(());
+    }
     if tv {
         let abs = path.canonicalize().map_err(|e| e.to_string())?;
-        rest.retain(|a| Path::new(a) != path);
         rest.insert(0, abs.to_string_lossy().into_owned());
         return ghostty::tv(&rest, &talk.vars);
     }
@@ -288,12 +373,30 @@ fn present(args: &[String]) -> Result<(), String> {
     let mut was = n;
     // What each slide's run block printed when it last ran, by slide.
     let mut ran: std::collections::HashMap<usize, run::Output> = Default::default();
+    // Where ' goes: the slide before the last jump, or, to start with, the
+    // slide the last run was on, offered in the corner.
+    let mut leap = link.last().filter(|&k| k != n && k < talk.slides.len());
+    let mut offer = leap.is_some();
+    // A word in the bottom corner for a moment, and when it went up.
+    let mut note: Option<(String, Instant)> = None;
+    // The slide is frosted under "make me bigger".
+    let mut small = false;
+    // The screen's as it should be but for a note: only that's drawn.
+    let mut hold = false;
     loop {
         s.hurry = false;
         let slide = &talk.slides[n];
+        if hold {
+            hold = false;
+        } else {
+        if small {
+            s.thaw();
+            small = false;
+        }
         // Before the slide plays in, so the notes change with the key, not
         // after the animation.
         link.publish(n, shown);
+        link.remember(n);
         if let Some(sh) = &share {
             sh.hub.state(state(&talk, n, shown, &s));
         }
@@ -310,6 +413,16 @@ fn present(args: &[String]) -> Result<(), String> {
                 run::show(&mut s, &talk, n, o, false);
             }
         }
+        // Too big for the window: say so over it, frosted.
+        if let Some(need) = render::needs(&talk, n, s.w, s.h) {
+            render::small(&mut s, &talk, n, need);
+            small = true;
+        }
+        if offer {
+            let st = markup::Style::fg(talk.theme.muted);
+            let t = format!("' back to slide {}", leap.unwrap_or(0) + 1);
+            s.put_str(s.h, s.w - t.chars().count() as i32, &t, st);
+        }
         if let Some(p) = &problem {
             let st = markup::Style::fg(talk.theme.bad);
             s.put_str(s.h, 1, p, st);
@@ -318,8 +431,13 @@ fn present(args: &[String]) -> Result<(), String> {
             let st = markup::Style::fg(talk.theme.accent);
             s.put_str(s.h, 2, &format!("go to {jump}_  "), st);
         }
-        s.flush();
         mode = Mode::Still;
+        }
+        if let Some((t, _)) = &note {
+            let st = markup::Style::fg(talk.theme.muted);
+            s.put_str(s.h, s.w - t.chars().count() as i32, t, st);
+        }
+        s.flush();
         // Wait for a key, looking every tenth of a second for a resize, the
         // talk saved, or the notes window asking for something.
         let act = match s.pending.take() {
@@ -332,6 +450,15 @@ fn present(args: &[String]) -> Result<(), String> {
                 }
                 if s.redraw || share.as_ref().is_some_and(|sh| sh.hub.joined()) {
                     break Act::Redraw;
+                }
+                // The note's moment over: gone, the rest left as it is.
+                if let Some((t, at)) = &note
+                    && at.elapsed() > Duration::from_millis(1600)
+                {
+                    let blank = " ".repeat(t.chars().count());
+                    s.put_str(s.h, s.w - t.chars().count() as i32, &blank, markup::Style::default());
+                    s.flush();
+                    note = None;
                 }
                 if event::poll(Duration::from_millis(if s.sky.is_some() { 15 } else { 100 })).unwrap_or(false) {
                     match event::read() {
@@ -411,8 +538,31 @@ fn present(args: &[String]) -> Result<(), String> {
             Act::Live if slide.enter.is_none() => Act::Next,
             a => a,
         };
+        // Anything but a quit: the first q forgotten.
+        if !matches!(act, Act::Quit | Act::None) && note.as_ref().is_some_and(|(t, _)| t == QUIT) {
+            note = None;
+        }
+        // The offer's gone at the first key, and drawn over.
+        let offered = offer;
+        if !matches!(act, Act::None | Act::Redraw) {
+            offer = false;
+        }
+        let from = n;
         match act {
-            Act::Quit => break,
+            Act::Exit => break,
+            // One q could be a slip, mid-talk: it takes two.
+            Act::Quit if note.as_ref().is_some_and(|(t, _)| t == QUIT) => break,
+            Act::Quit => {
+                note = Some((QUIT.into(), Instant::now()));
+                hold = !offered;
+            }
+            Act::Help => render::help(&mut s, &talk, n),
+            Act::Blank => render::blank(&mut s, &talk, n, shown),
+            Act::Leap => {
+                if let Some(k) = leap {
+                    (n, shown, mode) = (k.min(last), 0, Mode::Arrive);
+                }
+            }
             Act::Grow(by) => {
                 if let Some(f) = font.as_mut() {
                     f.grow(&mut s, by);
@@ -444,7 +594,15 @@ fn present(args: &[String]) -> Result<(), String> {
             }
             Act::Next if shown < steps => (shown, mode) = (shown + 1, Mode::Step),
             Act::Next if n < last => (n, shown, mode) = (n + 1, 0, render::arrive(&talk, n + 1)),
+            Act::Next => {
+                note = Some(("the end".into(), Instant::now()));
+                hold = !offered;
+            }
             _ => {}
+        }
+        // A jump, not a step: ' comes back.
+        if n != from && !matches!(act, Act::Next | Act::Back) {
+            leap = Some(from);
         }
     }
     link.gone();
@@ -455,11 +613,18 @@ fn present(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// What the first q says.
+const QUIT: &str = "q again to quit";
+
 /// What a key asks for.
 enum Act {
     None,
     Redraw,
     Quit,
+    Exit,
+    Help,
+    Blank,
+    Leap,
     Next,
     Back,
     Last,
@@ -477,7 +642,10 @@ enum Act {
 fn act(k: KeyEvent) -> Act {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     match k.code {
-        KeyCode::Char('c') if ctrl => Act::Quit,
+        KeyCode::Char('c') if ctrl => Act::Exit,
+        KeyCode::Char('?') => Act::Help,
+        KeyCode::Char('B' | '.') => Act::Blank,
+        KeyCode::Char('\'') => Act::Leap,
         KeyCode::Char('q') | KeyCode::Esc => Act::Quit,
         KeyCode::Char('+' | '=') => Act::Grow(1),
         KeyCode::Char('-') => Act::Grow(-1),

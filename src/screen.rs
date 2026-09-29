@@ -51,6 +51,9 @@ pub struct Screen {
     pub redraw: bool,
     /// Watchers, with --share: everything drawn goes to them too.
     pub tap: Option<crate::share::Hub>,
+    /// Whether something put fell off the screen, across and down: the
+    /// window's too small for it.
+    pub clip: (bool, bool),
 }
 
 #[derive(Default)]
@@ -116,6 +119,7 @@ impl Screen {
             pointed: f64::NEG_INFINITY,
             redraw: false,
             tap: None,
+            clip: (false, false),
         };
         s.size();
         s
@@ -413,7 +417,16 @@ impl Screen {
 
     /// Cells at a place, as much of them as is on the screen.
     pub fn put(&mut self, row: i32, col: i32, l: &[Cell]) {
+        let mut c = col;
+        for cell in l {
+            let cw = cell.ch.width().unwrap_or(0) as i32;
+            if cell.ch != ' ' && (c < 1 || c + cw - 1 > self.w) {
+                self.clip.0 = true;
+            }
+            c += cw;
+        }
         if row < 1 || row > self.h {
+            self.clip.1 |= l.iter().any(|c| c.ch != ' ');
             return;
         }
         if self.sky.is_some() {

@@ -92,7 +92,7 @@ const FALLBACK: [&str; 7] = [
 
 /// The font family the terminal's config names, if it's one whose config
 /// deque can read.
-fn configured() -> Option<String> {
+pub fn configured() -> Option<String> {
     let home = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?);
     let cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or(home.join(".config"));
     let env = |k: &str| std::env::var(k).unwrap_or_default();

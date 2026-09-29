@@ -145,3 +145,51 @@ pub fn find<'a>(opts: &'a [Opt], key: &str) -> Option<&'a Opt> {
 pub fn names(v: &[Named]) -> String {
     v.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
 }
+
+/// For a word that's none of these: the one it's likely a slip for, as
+/// the start of a diagnostic, or nothing when none is close.
+pub fn near<'a>(word: &str, among: impl IntoIterator<Item = &'a str>) -> String {
+    let w: Vec<char> = word.to_lowercase().chars().collect();
+    // Letters in, out, changed or swapped with the next.
+    let dist = |b: &str| {
+        let b: Vec<char> = b.chars().collect();
+        let mut d = vec![vec![0usize; b.len() + 1]; w.len() + 1];
+        for (i, r) in d.iter_mut().enumerate() {
+            r[0] = i;
+        }
+        for (j, v) in d[0].iter_mut().enumerate() {
+            *v = j;
+        }
+        for i in 1..=w.len() {
+            for j in 1..=b.len() {
+                let mut v = (d[i - 1][j - 1] + usize::from(w[i - 1] != b[j - 1])).min(d[i - 1][j] + 1).min(d[i][j - 1] + 1);
+                if i > 1 && j > 1 && w[i - 1] == b[j - 2] && w[i - 2] == b[j - 1] {
+                    v = v.min(d[i - 2][j - 2] + 1);
+                }
+                d[i][j] = v;
+            }
+        }
+        d[w.len()][b.len()]
+    };
+    // A slip: a letter or two off, fewer for short words.
+    let most = if w.len() <= 4 { 1 } else { 2 };
+    // Ties to the one the same length: a swap over a letter left out.
+    match among.into_iter().map(|c| (dist(&c.to_lowercase()), c.chars().count().abs_diff(w.len()), c)).filter(|&(d, ..)| d <= most).min() {
+        Some((.., c)) => format!("did you mean \"{}\"? ", c.to_lowercase()),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slips_are_named() {
+        let keys = || SLIDE.iter().map(|o| o.key);
+        assert_eq!(near("syk", keys()), "did you mean \"sky\"? ");
+        assert_eq!(near("glwo", keys()), "did you mean \"glow\"? ");
+        assert_eq!(near("Rust", ["rs", "rust", "rst"]), "did you mean \"rust\"? ");
+        assert_eq!(near("banana", keys()), "");
+    }
+}

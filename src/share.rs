@@ -36,9 +36,9 @@ const PATIENCE: Duration = Duration::from_secs(5);
 
 /// xterm.js, pinned to the version and the bytes: a browser won't run it
 /// if the CDN hands over anything else.
-const XTERM: &str = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0";
-const XTERM_JS: &str = "sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/";
-const XTERM_CSS: &str = "sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP";
+pub const XTERM: &str = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0";
+pub const XTERM_JS: &str = "sha384-M169f14mRZOXm3hD/v2Ti0ThIT/RnAQagXA9nlE15yHAtrW19gdePJh/HaTzUOe/";
+pub const XTERM_CSS: &str = "sha384-8Xk9wy/gzEDUKrXtrmCFa2bBuK3BpjpDuL/p0SeKQX19Khl/M+lHOgD/CyYf7efP";
 
 /// Where watchers get what's drawn.
 #[derive(Clone)]

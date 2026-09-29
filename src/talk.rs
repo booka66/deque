@@ -341,7 +341,7 @@ impl P<'_> {
         }
         let msg = match v {
             "" => format!("{what}: which? there's {}", spec::names(set)),
-            _ => format!("no {what} \"{v}\"; there's {}", spec::names(set)),
+            _ => format!("no {what} \"{v}\"; {}there's {}", spec::near(v, set.iter().map(|(n, _)| *n)), spec::names(set)),
         };
         self.err(col, col + v.chars().count(), msg);
         None
@@ -419,7 +419,7 @@ pub fn parse(src: &str, dir: &Path, lenient: bool) -> (Talk, Vec<Diag>) {
                 None => p.err(col, l.chars().count(), format!("\"{v}\" isn't a color: #rrggbb, or 38;2;r;g;b")),
             },
             _ => {
-                let msg = format!("no setting \"{k}\"; there's {}", spec::TALK.iter().map(|o| o.key).collect::<Vec<_>>().join(", "));
+                let msg = format!("no setting \"{k}\"; {}there's {}", spec::near(k, spec::TALK.iter().map(|o| o.key)), spec::TALK.iter().map(|o| o.key).collect::<Vec<_>>().join(", "));
                 p.err(0, k.len(), msg);
             }
         }
@@ -457,12 +457,13 @@ fn slide(p: &mut P, lines: &[&str], start: usize, end: usize) -> Slide {
         let Some((k, v)) = key_line(l) else { break };
         if spec::find(spec::SLIDE, k).is_none() {
             let keys = spec::SLIDE.iter().map(|o| o.key).collect::<Vec<_>>().join(", ");
+            let near = spec::near(k, spec::SLIDE.iter().map(|o| o.key));
             if i == start + 1 {
                 // Maybe text that has a colon in it; say so, but show it.
-                p.warn(0, k.len(), format!("shown as text: \"{k}\" isn't a slide option ({keys}). Options go right after `---`"));
+                p.warn(0, k.len(), format!("shown as text: \"{k}\" isn't a slide option; {near}there's {keys}. Options go right after `---`"));
                 break;
             }
-            p.err(0, k.len(), format!("no slide option \"{k}\"; there's {keys}. Put a blank line between options and text"));
+            p.err(0, k.len(), format!("no slide option \"{k}\"; {near}there's {keys}. Put a blank line between options and text"));
             i += 1;
             continue;
         }
@@ -841,7 +842,7 @@ fn open(p: &mut P, l: &str, info: &str, i: usize, ran: bool) -> Option<Open> {
     let chart = lang == "chart";
     if !chart && !code::known(&lang) {
         let at = l.find(&lang).unwrap_or(0);
-        p.err(at, at + lang.len(), format!("no language \"{lang}\"; try ts, tsx, js, rs, py, go, sh, json, yaml, sql, diff, or chart"));
+        p.err(at, at + lang.len(), format!("no language \"{lang}\"; {}try ts, tsx, js, rs, py, go, sh, json, yaml, sql, diff, or chart", spec::near(&lang, code::languages().iter().flat_map(|(n, full)| [n.as_str(), full.as_str()]).chain(["chart"]))));
     }
     let mut o = Open { lang, run: None, file: None, focus: vec![], at: i + 1, src: vec![] };
     while let Some(w) = words.next() {
@@ -1026,7 +1027,7 @@ fn drawing(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize, w:
             }
             _ => {
                 let cmds = spec::DRAW.iter().map(|d| d.0).collect::<Vec<_>>().join(", ");
-                p.err(0, cmd.chars().count(), format!("no drawing command \"{cmd}\"; there's {cmds}"));
+                p.err(0, cmd.chars().count(), format!("no drawing command \"{cmd}\"; {}there's {cmds}", spec::near(cmd, spec::DRAW.iter().map(|d| d.0))));
                 None
             }
         };

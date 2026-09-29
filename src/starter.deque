@@ -1,0 +1,63 @@
+#!/usr/bin/env deque
+// A talk to start from. Present it with deque, and keep it open while you
+// edit: it reloads as you save, on the slide you changed. ? shows the keys.
+// Everything deque does is in its README; deque check finds mistakes.
+
+tr: dissolve
+
+---
+sky: stars
+glow: on
+then: shine
+
+# {TITLE}
+**a talk, in a text file**
+// Lines like this are speaker notes: deque notes FILE shows them, with a
+// timer, in another window.
+
+{muted}→ on · ← back · ? keys{/}
+
+---
+time: 1m
+
+## why
+# WHY
+the problem, in a line
+> a step: it waits for a key
+> and another
+{muted}time: says how long a slide should take; deque notes keeps pace{/}
+
+---
+## code
+```ts
+export function total(items: Item[]): number {
+  return items.reduce((sum, i) => sum + i.price, 0);
+}
+```
+{muted}a fenced block with a language is code, in the talk's colors{/}
+
+---
+## code
+```ts focus: 1|2-4
+export function total(items: Item[], tax = 0.08): number {
+  const sum = items.reduce((s, i) => s + i.price, 0);
+  return sum * (1 + tax);
+}
+```
+{muted}the same language on the next slide morphs; focus: lights lines, a step each{/}
+
+---
+## numbers
+```chart
+before   120
+after     18
+```
+{muted}a chart: a label and a number a line{/}
+
+---
+tr: morph
+sky: fireflies
+
+## that's it
+# THANKS
+questions?
