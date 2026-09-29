@@ -72,6 +72,9 @@ pub struct Theme {
     pub link: Rgb,
     pub fg: Rgb,
     pub bg: Rgb,
+    /// Whether the talk set bg, or it's the default, for the terminal's own
+    /// to take the place of.
+    pub bg_given: bool,
 }
 
 impl Default for Theme {
@@ -85,6 +88,7 @@ impl Default for Theme {
             link: Rgb(131, 165, 152),
             fg: Rgb(235, 219, 178),
             bg: Rgb(40, 40, 40),
+            bg_given: false,
         }
     }
 }
@@ -111,7 +115,7 @@ impl Theme {
             "warm" => self.warm = c,
             "link" => self.link = c,
             "fg" => self.fg = c,
-            "bg" => self.bg = c,
+            "bg" => (self.bg, self.bg_given) = (c, true),
             _ => return false,
         }
         true

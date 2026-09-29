@@ -70,11 +70,14 @@ pub fn font() -> Option<fontdue::Font> {
     if std::env::var("DEQUE_SMOOTH").as_deref() == Ok("off") {
         return None;
     }
-    let path = std::env::var_os("DEQUE_FACE")
-        .map(PathBuf::from)
-        .or_else(|| configured().and_then(|f| installed(&f)))
-        .or_else(|| FALLBACK.iter().map(PathBuf::from).find(|p| p.is_file()))?;
+    let path = face().or_else(|| FALLBACK.iter().map(PathBuf::from).find(|p| p.is_file()))?;
     fontdue::Font::from_bytes(std::fs::read(path).ok()?, fontdue::FontSettings::default()).ok()
+}
+
+/// The terminal's own font file: DEQUE_FACE, or the family its config
+/// names, found. None when deque can't tell, rather than a guess.
+pub fn face() -> Option<PathBuf> {
+    std::env::var_os("DEQUE_FACE").map(PathBuf::from).or_else(|| configured().and_then(|f| installed(&f)))
 }
 
 const FALLBACK: [&str; 7] = [

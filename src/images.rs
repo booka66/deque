@@ -185,6 +185,22 @@ pub fn detect() -> Proto {
     Proto::Blocks
 }
 
+/// The terminal's background color, asked outright (OSC 11), for a talk
+/// that doesn't set its own: what skies and frost paint the screen with.
+pub fn background() -> Option<Rgb> {
+    parse_bg(&ask("\x1b]11;?\x1b\\\x1b[c"))
+}
+
+/// `rgb:RRRR/GGGG/BBBB`, each 1 to 4 hex digits, as xterm answers.
+fn parse_bg(reply: &str) -> Option<Rgb> {
+    let rest = reply.split("]11;rgb:").nth(1)?;
+    let mut v = rest.split(['/', '\x07', '\x1b']).take(3).map(|h| {
+        let n = u32::from_str_radix(h, 16).ok()?;
+        Some((n * 255 / ((1u32 << (4 * h.len().clamp(1, 4))) - 1)) as u8)
+    });
+    Some(Rgb(v.next()??, v.next()??, v.next()??))
+}
+
 /// Writes a query and reads what comes back, up to the device attributes'
 /// closing c or half a second.
 #[cfg(unix)]
@@ -223,4 +239,16 @@ fn ask(q: &str) -> String {
 #[cfg(not(unix))]
 fn ask(_: &str) -> String {
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_background_reply() {
+        assert_eq!(parse_bg("\x1b]11;rgb:1d1d/2020/2121\x1b\\\x1b[?62c"), Some(Rgb(29, 32, 33)));
+        assert_eq!(parse_bg("\x1b]11;rgb:ff/80/00\x07"), Some(Rgb(255, 128, 0)));
+        assert_eq!(parse_bg("\x1b[?62c"), None);
+    }
 }

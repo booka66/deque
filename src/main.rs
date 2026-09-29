@@ -7,15 +7,19 @@ mod code;
 mod fx;
 mod ghostty;
 mod images;
+mod life;
 mod link;
 mod lsp;
 mod markup;
 mod morph;
 mod notes;
 mod preview;
+#[cfg(unix)]
+mod relay;
 mod render;
 mod run;
 mod screen;
+mod share;
 mod sky;
 mod spec;
 mod talk;
@@ -48,9 +52,17 @@ deque: slides in your terminal
   deque lsp            the language server, for editors
 
   --cursor, --no-cursor   show or hide the cursor (the talk's `cursor:` otherwise)
+  --share                 stream it live on the network, for anyone who can't
+                          see, in a browser: w shows the link and a QR code;
+                          a slide can say ${DEQUE_URL}
+  --share-curl            --share, and offer curl -sN to watch in a terminal
+                          too; plain HTTP, so for networks you trust
+  --share-no-font         --share, but the page draws in its own monospace,
+                          not the terminal's font (DEQUE_FACE, or its config)
 
 keys: → space enter n on · ← b back · 12 enter: slide 12 · o all slides
-      r replay the slide · home end · q quit
+      r replay the slide · w how to watch (--share) · home end · q quit
+the mouse is a laser pointer
 The talk reloads when you save it, and shows the slide you changed.";
 
 fn main() -> ExitCode {
@@ -148,7 +160,8 @@ fn modified(p: &Path) -> Option<SystemTime> {
 
 fn present(args: &[String]) -> Result<(), String> {
     let mut path: Option<PathBuf> = None;
-    let (mut start, mut print, mut tv, mut cursor) = (1usize, false, false, None);
+    let (mut start, mut print, mut tv, mut cursor, mut sharing, mut curl) = (1usize, false, false, None, false, false);
+    let mut own_font = true;
     let (mut cast, mut size) = (None, (100, 30));
     let mut rest = vec![];
     let mut it = args.iter();
@@ -167,6 +180,9 @@ fn present(args: &[String]) -> Result<(), String> {
             }
             "--cursor" => cursor = Some(true),
             "--no-cursor" => cursor = Some(false),
+            "--share" => sharing = true,
+            "--share-curl" => (sharing, curl) = (true, true),
+            "--share-no-font" => (sharing, own_font) = (true, false),
             _ if a.starts_with('-') => return Err(format!("deque: no option {a}\n\n{HELP}\n")),
             _ if path.is_none() => path = Some(PathBuf::from(a)),
             _ => start = a.parse().map_err(|_| format!("deque: \"{a}\" isn't a slide number\n"))?,
@@ -176,6 +192,18 @@ fn present(args: &[String]) -> Result<(), String> {
         }
     }
     let path = path.ok_or(format!("{HELP}\n"))?;
+    // Before the talk's read, so its slides can say where to watch.
+    let share = match sharing && !tv && !print {
+        true => Some(share::start(&markup::Theme::default(), curl, fine::face().filter(|_| own_font))?),
+        false => None,
+    };
+    if let Some(sh) = &share {
+        // SAFETY: nothing else runs yet to read the environment.
+        unsafe {
+            std::env::set_var("DEQUE_URL", &sh.url);
+            std::env::set_var("DEQUE_WATCH", sh.curl.as_ref().unwrap_or(&sh.url));
+        }
+    }
     let mut talk = load(&path, false)?;
     if print {
         print!("{}", render::print_all(&talk, std::io::stdout().is_terminal()));
@@ -204,15 +232,26 @@ fn present(args: &[String]) -> Result<(), String> {
         hook(i)
     }));
     let proto = images::detect();
+    // The terminal's own background, for a talk that doesn't say.
+    let term_bg = images::background();
+    adopt(&mut talk, term_bg);
+    s.theme = talk.theme.clone();
     s.kitty = proto == images::Proto::Kitty;
-    if s.kitty {
+    // Watchers can't be sent pictures of moving text; with them, it smears.
+    if s.kitty && share.is_none() {
         s.font = fine::font();
+    }
+    if let Some(sh) = &share {
+        sh.hub.theme(&talk.theme);
+        s.tap = Some(sh.hub.clone());
     }
     let mut pics = images::Pictures::new(proto);
     let show = if cursor { "\x1b[?25h" } else { "\x1b[?25l" };
     // The wheel, on this screen, is sent as ↑ and ↓ unless alternate scroll
-    // is off (1007); off it goes.
-    let enter = format!("\x1b[?1049h\x1b[?1007l{show}");
+    // is off (1007); off it goes. The mouse is followed (1003, in SGR's
+    // form, 1006) for the laser pointer, and its own arrow hidden (OSC 22)
+    // where the terminal will.
+    let enter = format!("\x1b[?1049h\x1b[?1007l\x1b[?1003h\x1b[?1006h\x1b]22;none\x1b\\{show}");
     s.raw(&enter);
     s.flush();
     let mut font = ghostty::Font::from_env();
@@ -228,6 +267,8 @@ fn present(args: &[String]) -> Result<(), String> {
     let mut link = link::Link::new(&path);
     // A slide number being typed, to go to on enter.
     let mut jump = String::new();
+    // The slide on the screen before this one, for the way out of it.
+    let mut was = n;
     // What each slide's run block printed when it last ran, by slide.
     let mut ran: std::collections::HashMap<usize, run::Output> = Default::default();
     loop {
@@ -236,11 +277,12 @@ fn present(args: &[String]) -> Result<(), String> {
         // Before the slide plays in, so the notes change with the key, not
         // after the animation.
         link.publish(n, shown);
-        if mode == Mode::Arrive && started {
-            fx::transition(&mut s, &talk.tr(slide));
+        if mode == Mode::Arrive && started && render::leave(&mut s, &talk, was.min(talk.slides.len() - 1), n) {
+            mode = Mode::Still;
         }
         started = true;
         render::draw(&mut s, &talk, &mut pics, n, mode, shown, font.is_some());
+        was = n;
         if let Some(r) = &slide.run {
             if mode == Mode::Step && shown == r.step {
                 ran.insert(n, run::go(&mut s, &talk, n));
@@ -268,10 +310,14 @@ fn present(args: &[String]) -> Result<(), String> {
                     s.size();
                     break Act::Redraw;
                 }
+                if s.redraw || share.as_ref().is_some_and(|sh| sh.hub.joined()) {
+                    break Act::Redraw;
+                }
                 if event::poll(Duration::from_millis(if s.sky.is_some() { 15 } else { 100 })).unwrap_or(false) {
                     match event::read() {
                         Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => break act(k),
                         Ok(Event::Resize(..)) => s.resized = true,
+                        Ok(Event::Mouse(m)) => s.mouse(m),
                         _ => {}
                     }
                     continue;
@@ -301,8 +347,12 @@ fn present(args: &[String]) -> Result<(), String> {
                             // beside the editor, as a preview.
                             let edited = changed(&src, &talk, &new, &t);
                             talk = t;
+                            adopt(&mut talk, term_bg);
                             src = new;
                             ran.clear();
+                            if let Some(sh) = &share {
+                                sh.hub.theme(&talk.theme);
+                            }
                             s.theme = talk.theme.clone();
                             problem = None;
                             n = edited.unwrap_or(n).min(talk.slides.len() - 1);
@@ -360,12 +410,20 @@ fn present(args: &[String]) -> Result<(), String> {
                     (n, shown, mode) = (k, 0, Mode::Arrive);
                 }
             }
+            Act::Watch => {
+                if let Some(sh) = &share {
+                    render::watch(&mut s, &talk, n, &sh.url, sh.curl.as_deref());
+                }
+            }
             Act::Next if shown < steps => (shown, mode) = (shown + 1, Mode::Step),
             Act::Next if n < last => (n, shown, mode) = (n + 1, 0, render::arrive(&talk, n + 1)),
             _ => {}
         }
     }
     link.gone();
+    if let Some(sh) = &share {
+        sh.hub.end();
+    }
     restore();
     Ok(())
 }
@@ -382,6 +440,7 @@ enum Act {
     Replay,
     Live,
     Overview,
+    Watch,
     Grow(i32),
     Digit(char),
     Erase,
@@ -399,6 +458,7 @@ fn act(k: KeyEvent) -> Act {
         KeyCode::End | KeyCode::Char('G') => Act::Last,
         KeyCode::Char('r') => Act::Replay,
         KeyCode::Char('o') | KeyCode::Tab => Act::Overview,
+        KeyCode::Char('w') => Act::Watch,
         KeyCode::Char(d) if d.is_ascii_digit() => Act::Digit(d),
         KeyCode::Backspace => Act::Erase,
         KeyCode::Enter | KeyCode::Char(' ') => Act::Live,
@@ -425,8 +485,24 @@ fn live(s: &mut Screen, talk: &Talk, slide: &talk::Slide, font: Option<&ghostty:
     if let (Some(f), Some(c)) = (font, slide.cols) {
         f.small(s, c);
     }
-    s.raw("\x1b[?25h\x1b[0m\x1b[H\x1b[2J");
+    s.raw("\x1b[?1003l\x1b[?1006l\x1b]22;default\x1b\\\x1b[?25h\x1b[0m\x1b[H\x1b[2J");
     s.flush();
+    // Watchers watching: through a terminal of deque's own, so they see it
+    // too.
+    #[cfg(unix)]
+    if let Some(hub) = s.tap.clone() {
+        if let Err(e) = relay::run(cmd, &talk.dir, &hub) {
+            eprint!("deque: {cmd}: {e}\r\n");
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        s.raw(enter);
+        s.flush();
+        if let Some(f) = font {
+            f.set(s, f.size);
+        }
+        s.size();
+        return;
+    }
     let _ = terminal::disable_raw_mode();
     let mut c = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
@@ -450,10 +526,17 @@ fn live(s: &mut Screen, talk: &Talk, slide: &talk::Slide, font: Option<&ghostty:
     s.size();
 }
 
+/// The terminal's background for the talk's, unless the talk set its own.
+fn adopt(talk: &mut Talk, bg: Option<markup::Rgb>) {
+    if let Some(c) = bg.filter(|_| !talk.theme.bg_given) {
+        talk.theme.bg = c;
+    }
+}
+
 fn restore() {
     use std::io::Write;
     let _ = terminal::disable_raw_mode();
     let mut o = std::io::stdout();
-    let _ = o.write_all(b"\x1b[0m\x1b[?1007h\x1b[?1049l\x1b[?25h");
+    let _ = o.write_all(b"\x1b[0m\x1b[?1003l\x1b[?1006l\x1b]22;default\x1b\\\x1b[?1007h\x1b[?1049l\x1b[?25h");
     let _ = o.flush();
 }

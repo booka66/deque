@@ -19,6 +19,8 @@ pub enum Kind {
     Rain,
     Embers,
     Life,
+    Boids,
+    Fireflies,
 }
 
 impl Kind {
@@ -29,6 +31,8 @@ impl Kind {
             "rain" => Kind::Rain,
             "embers" => Kind::Embers,
             "life" => Kind::Life,
+            "boids" => Kind::Boids,
+            "fireflies" => Kind::Fireflies,
             _ => Kind::None,
         }
     }
@@ -80,6 +84,15 @@ pub struct Sky {
     /// A screen frozen and blurred, a color and how much of it each pixel
     /// takes, behind whatever's drawn now.
     frost: Option<Vec<(Rgb, f64)>>,
+    /// The mouse, in pixels, and when it last moved: a laser pointer's dot
+    /// and the light around it, fading once it's still. Each click, a ring
+    /// going out from where it was, and when.
+    pub pointer: Option<(f64, f64, f64)>,
+    pub ripples: Vec<(f64, f64, f64)>,
+    /// Where the pointer's been lately, and when, for its trail.
+    pub trail: Vec<(f64, f64, f64)>,
+    /// With boids: hawks, bigger and faster, after the nearest bird.
+    hawks: Vec<Mote>,
 }
 
 pub const QUAD: [char; 16] = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█'];
@@ -105,7 +118,7 @@ fn mean(cs: &[Rgb]) -> Rgb {
 /// Four pixels (top left, top right, bottom left, bottom right) as one
 /// cell: split into the brighter and the darker by the two most unlike, a
 /// quadrant block in the first over the second.
-fn quad(p: [Rgb; 4]) -> Cell {
+pub fn quad(p: [Rgb; 4]) -> Cell {
     let mut best = (0, 0, 1);
     for i in 0..4 {
         for j in i + 1..4 {
@@ -165,6 +178,10 @@ impl Sky {
             kernel,
             quiet: vec![],
             frost: None,
+            pointer: None,
+            ripples: vec![],
+            trail: vec![],
+            hawks: vec![],
         };
         s.fill();
         s
@@ -183,6 +200,8 @@ impl Sky {
             Kind::Snow => self.pw as f64 / 2.5,
             Kind::Rain => self.pw as f64 / 3.0,
             Kind::Embers => self.pw as f64 / 2.5,
+            Kind::Boids => (area / 160.0).max(40.0),
+            Kind::Fireflies => 18.0,
             Kind::Life => {
                 for i in 0..self.cells.len() {
                     self.cells[i] = self.rand() < 0.16;
@@ -194,6 +213,12 @@ impl Sky {
         for _ in 0..n {
             let m = self.spawn(true);
             self.motes.push(m);
+        }
+        if self.kind == Kind::Boids {
+            for _ in 0..2 {
+                let m = self.spawn(true);
+                self.hawks.push(Mote { vx: m.vx * 1.4, vy: m.vy * 1.4, ..m });
+            }
         }
     }
 
@@ -224,6 +249,11 @@ impl Sky {
                     m.y = -self.rand() * h * 0.5;
                 }
             }
+            Kind::Boids => {
+                let (ang, v) = (self.rand() * 6.283, 10.0 + 5.0 * r);
+                (m.vx, m.vy, m.a) = (v * ang.cos(), v * ang.sin() / 2.0, 0.55 + 0.25 * r);
+            }
+            Kind::Fireflies => m.a = 0.7 + 0.3 * r,
             Kind::Embers => {
                 (m.vy, m.a, m.life) = (-(3.0 + 7.0 * r), 0.55 + 0.45 * r, 4.0 + 6.0 * self.rand());
                 m.age = if anywhere { self.rand() * m.life } else { 0.0 };
@@ -239,6 +269,8 @@ impl Sky {
     pub fn frame(&mut self, t: f64, theme: &Theme, front: &[Option<Cell>], w: usize) {
         let dt = (t - self.t).clamp(0.0, 0.1);
         self.t = t;
+        // Where text is first, for what steers around it.
+        self.hush(front, w);
         self.step(dt, t);
         let base = theme.bg;
         self.field.fill(base);
@@ -250,10 +282,36 @@ impl Sky {
                 *p = p.mix(*c, *k);
             }
         }
+        self.point(t, theme);
+        if self.kind == Kind::Fireflies {
+            self.lanterns(t, theme);
+        }
         self.px.copy_from_slice(&self.field);
-        self.hush(front, w);
         self.draw(t, theme);
+        self.laser(t, theme);
         self.quiet.clear();
+        if self.frost.is_some() {
+            self.soften();
+        }
+    }
+
+    /// Behind frost, what moves is blurred too: what the motes added to
+    /// the field, spread out, and brighter for it, so they don't vanish.
+    fn soften(&mut self) {
+        let mut d: Vec<[f64; 4]> = self
+            .px
+            .iter()
+            .zip(&self.field)
+            .map(|(p, f)| [0.0, p.0 as f64 - f.0 as f64, p.1 as f64 - f.1 as f64, p.2 as f64 - f.2 as f64])
+            .collect();
+        for _ in 0..2 {
+            blur(&mut d, self.pw, self.ph, 1, 1);
+        }
+        blur(&mut d, self.pw, self.ph, 1, self.pw);
+        for (p, (f, d)) in self.px.iter_mut().zip(self.field.iter().zip(&d)) {
+            let c = |f: u8, d: f64| (f as f64 + d * 2.6).clamp(0.0, 255.0) as u8;
+            *p = Rgb(c(f.0, d[1]), c(f.1, d[2]), c(f.2, d[3]));
+        }
     }
 
     /// What's on the screen now, frozen and blurred, to stay behind what's
@@ -297,6 +355,16 @@ impl Sky {
         self.frost = None;
     }
 
+    /// The frost now, taken off.
+    pub fn take_frost(&mut self) -> Option<Vec<(Rgb, f64)>> {
+        self.frost.take()
+    }
+
+    /// Frost of its own, as take_frost gave it, maybe mixed.
+    pub fn set_frost(&mut self, f: Vec<(Rgb, f64)>) {
+        self.frost = Some(f);
+    }
+
     /// Where text is, and a cell round it: the sky goes faint there, so
     /// nothing moving crosses a letter.
     fn hush(&mut self, front: &[Option<Cell>], w: usize) {
@@ -333,6 +401,18 @@ impl Sky {
                 m = self.spawn(false);
             }
             self.motes[i] = m;
+        }
+        match self.kind {
+            Kind::Boids => self.flock(dt),
+            Kind::Fireflies => {
+                // Each wanders on its own slow curve, round the edges.
+                for m in &mut self.motes {
+                    let ang = m.ph + 1.4 * (t * 0.31 + m.ph * 2.0).sin() + 0.9 * (t * 0.67 + m.ph).sin();
+                    m.x = (m.x + 3.0 * ang.cos() * dt).rem_euclid(w);
+                    m.y = (m.y + 1.5 * ang.sin() * dt).rem_euclid(h);
+                }
+            }
+            _ => {}
         }
         if self.kind == Kind::Stars {
             self.next_streak -= dt;
@@ -431,6 +511,173 @@ impl Sky {
         }
     }
 
+    /// Boids: each keeps near the others, goes their way, keeps its
+    /// distance, and turns off before it reaches text.
+    fn flock(&mut self, dt: f64) {
+        let (w, h) = (self.pw as f64, self.ph as f64);
+        let all = self.motes.clone();
+        // The hunt: each hawk turns toward the bird nearest it, faster than
+        // a bird cruises, slower than one fleeing.
+        for k in 0..self.hawks.len() {
+            let mut h2 = self.hawks[k];
+            let near = all.iter().min_by(|a, b| {
+                let d = |o: &Mote| (o.x - h2.x).powi(2) + ((o.y - h2.y) * 2.0).powi(2);
+                d(a).total_cmp(&d(b))
+            });
+            if let Some(o) = near {
+                h2.vx += (o.x - h2.x) * 1.6 * dt;
+                h2.vy += (o.y - h2.y) * 1.6 * dt;
+            }
+            let v = (h2.vx * h2.vx + h2.vy * h2.vy * 4.0).sqrt().max(0.1);
+            let k2 = v.clamp(12.0, 24.0) / v;
+            (h2.vx, h2.vy) = (h2.vx * k2, h2.vy * k2);
+            h2.x = (h2.x + h2.vx * dt).rem_euclid(w);
+            h2.y = (h2.y + h2.vy * dt).rem_euclid(h);
+            self.hawks[k] = h2;
+        }
+        // What to scatter from: the hawks, and the pointer while it's in use.
+        let mut threats: Vec<(f64, f64)> = self.hawks.iter().map(|m| (m.x, m.y)).collect();
+        threats.extend(self.pointer.filter(|p| self.t - p.2 < 2.0).map(|p| (p.0, p.1)));
+        let hawk = !threats.is_empty();
+        for (i, m) in self.motes.iter_mut().enumerate() {
+            let (mut cx, mut cy, mut ax, mut ay, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            for (j, o) in all.iter().enumerate() {
+                let (dx, dy) = (o.x - m.x, (o.y - m.y) * 2.0);
+                let d = (dx * dx + dy * dy).sqrt();
+                if i == j || d > 16.0 {
+                    continue;
+                }
+                (cx, cy, ax, ay, n) = (cx + dx, cy + dy, ax + o.vx, ay + o.vy, n + 1.0);
+                if d < 5.0 {
+                    (sx, sy) = (sx - dx / d.max(0.5), sy - dy / d.max(0.5));
+                }
+            }
+            if n > 0.0 {
+                m.vx += (cx / n * 0.5 + (ax / n - m.vx) * 0.9 + sx * 6.0) * dt;
+                m.vy += (cy / n * 0.25 + (ay / n - m.vy) * 0.9 + sy * 3.0) * dt;
+            }
+            let mut fleeing = false;
+            for &(px, py) in &threats {
+                let (dx, dy) = (m.x - px, (m.y - py) * 2.0);
+                let d = (dx * dx + dy * dy).sqrt();
+                if d < 22.0 {
+                    let push = 260.0 * (1.0 - d / 22.0) / d.max(1.0);
+                    m.vx += dx * push * dt;
+                    m.vy += dy / 2.0 * push * dt;
+                    fleeing = true;
+                }
+            }
+            // Text ahead: turn to the left of the way it's going.
+            let (fx, fy) = (m.x + m.vx * 0.6, m.y + m.vy * 0.6);
+            let cell = |x: f64, y: f64| (y.rem_euclid(h) as usize / 2) * (self.pw / 2) + x.rem_euclid(w) as usize / 2;
+            if self.quiet.get(cell(fx, fy)).is_some_and(|q| *q) {
+                (m.vx, m.vy) = (m.vx * 0.85 + m.vy * 2.0 * 0.5, m.vy * 0.85 - m.vx / 2.0 * 0.5);
+            }
+            let v = (m.vx * m.vx + m.vy * m.vy * 4.0).sqrt().max(0.1);
+            // Faster when scattering, back to a cruise after.
+            let k = v.clamp(8.0, if hawk && fleeing { 34.0 } else { 18.0 }) / v;
+            (m.vx, m.vy) = (m.vx * k, m.vy * k);
+            m.x = (m.x + m.vx * dt).rem_euclid(w);
+            m.y = (m.y + m.vy * dt).rem_euclid(h);
+        }
+    }
+
+    /// How lit a firefly is: mostly dim, now and then bright.
+    fn lit(m: &Mote, t: f64) -> f64 {
+        (0.5 + 0.5 * (t * (0.6 + m.ph * 0.15) + m.ph * 3.0).sin()).powi(3)
+    }
+
+    /// Each firefly's light on what's around it, into the field.
+    fn lanterns(&mut self, t: f64, th: &Theme) {
+        let c = th.warm.mix(th.accent, 0.5);
+        let r = 10.0;
+        for m in self.motes.clone() {
+            let b = Self::lit(&m, t) * m.a;
+            if b < 0.05 {
+                continue;
+            }
+            for py in (m.y - r / 2.0).floor() as i32..=(m.y + r / 2.0).ceil() as i32 {
+                for px in (m.x - r).floor() as i32..=(m.x + r).ceil() as i32 {
+                    if px < 0 || py < 0 || px >= self.pw as i32 || py >= self.ph as i32 {
+                        continue;
+                    }
+                    let d = ((px as f64 - m.x).powi(2) + (2.0 * (py as f64 - m.y)).powi(2)).sqrt() / r;
+                    if d < 1.0 {
+                        let p = &mut self.field[py as usize * self.pw + px as usize];
+                        *p = p.mix(c, (1.0 - d).powi(2) * 0.42 * b);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The light around the pointer, into the field, so the text it's
+    /// over is lit too; gone a second after it stops.
+    fn point(&mut self, t: f64, th: &Theme) {
+        let Some((x, y, at)) = self.pointer else { return };
+        let fade = 1.0 - ((t - at - 1.2) / 0.8).clamp(0.0, 1.0);
+        if fade <= 0.0 {
+            return;
+        }
+        let r = 10.0;
+        for py in (y - r / 2.0).floor() as i32..=(y + r / 2.0).ceil() as i32 {
+            for px in (x - r).floor() as i32..=(x + r).ceil() as i32 {
+                if px < 0 || py < 0 || px >= self.pw as i32 || py >= self.ph as i32 {
+                    continue;
+                }
+                let d = ((px as f64 - x).powi(2) + (2.0 * (py as f64 - y)).powi(2)).sqrt() / r;
+                if d < 1.0 {
+                    let p = &mut self.field[py as usize * self.pw + px as usize];
+                    *p = p.mix(th.bad, (1.0 - d).powi(2) * 0.35 * fade);
+                }
+            }
+        }
+    }
+
+    /// The pointer's dot, and the rings clicks send out.
+    fn laser(&mut self, t: f64, th: &Theme) {
+        self.ripples.retain(|r| t - r.2 < 0.9);
+        for (x, y, at) in self.ripples.clone() {
+            let age = t - at;
+            let rad = 4.0 + 30.0 * age;
+            let n = (rad * 4.0) as usize;
+            for k in 0..n {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                let (px, py) = (x + rad * a.cos(), y + rad * a.sin() / 2.0);
+                if px >= 0.0 && py >= 0.0 && px < self.pw as f64 && py < self.ph as f64 {
+                    let p = &mut self.px[py as usize * self.pw + px as usize];
+                    *p = p.mix(th.bad, 0.7 * (1.0 - age / 0.9));
+                }
+            }
+        }
+        // The trail: along each stretch it moved, a pixel at a time, dimmer
+        // the longer ago.
+        const TRAIL: f64 = 0.35;
+        self.trail.retain(|p| t - p.2 < TRAIL);
+        for w in self.trail.clone().windows(2) {
+            let ((x0, y0, t0), (x1, y1, _)) = (w[0], w[1]);
+            let steps = ((x1 - x0).abs().max((y1 - y0).abs() * 2.0)).ceil().max(1.0) as usize;
+            for k in 0..steps {
+                let f = k as f64 / steps as f64;
+                let (px, py) = (x0 + (x1 - x0) * f, y0 + (y1 - y0) * f);
+                let age = (t - t0) / TRAIL;
+                if px >= 0.0 && py >= 0.0 && px < self.pw as f64 && py < self.ph as f64 {
+                    let p = &mut self.px[py as usize * self.pw + px as usize];
+                    *p = p.mix(th.bad, 0.75 * (1.0 - age).max(0.0).powi(2));
+                }
+            }
+        }
+        let Some((x, y, at)) = self.pointer else { return };
+        let fade = 1.0 - ((t - at - 1.2) / 0.8).clamp(0.0, 1.0);
+        for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            let (px, py) = ((x + dx - 0.5) as i32, (y + dy - 0.5) as i32);
+            if fade > 0.0 && px >= 0 && py >= 0 && (px as usize) < self.pw && (py as usize) < self.ph {
+                let p = &mut self.px[py as usize * self.pw + px as usize];
+                *p = p.mix(th.bad, fade);
+            }
+        }
+    }
+
     fn dot(&mut self, x: f64, y: f64, c: Rgb, a: f64) {
         let (x, y) = (x.round(), y.round());
         if x < 0.0 || y < 0.0 || x >= self.pw as f64 || y >= self.ph as f64 || a <= 0.0 {
@@ -460,6 +707,18 @@ impl Sky {
                         self.dot(m.x, m.y - k as f64, th.link, m.a * (1.0 - k as f64 / 6.0));
                     }
                 }
+                Kind::Boids => {
+                    // A head and a fainter tail behind it.
+                    let v = (m.vx * m.vx + m.vy * m.vy * 4.0).sqrt().max(1.0);
+                    let c = if m.tint < 2 { th.accent } else { th.fg };
+                    self.dot(m.x, m.y, c, m.a);
+                    self.dot(m.x - 1.5 * m.vx / v, m.y - 0.75 * m.vy / v * 2.0, c, m.a * 0.4);
+                }
+                Kind::Fireflies => {
+                    // The bright point; its light is in the field.
+                    let b = Self::lit(m, t);
+                    self.dot(m.x, m.y, th.warm.mix(th.fg, 0.4), m.a * (0.2 + 0.8 * b));
+                }
                 Kind::Embers => {
                     let k = m.age / m.life;
                     let c = th.warm.mix(th.bad, k.min(1.0));
@@ -472,6 +731,18 @@ impl Sky {
             }
         }
         self.motes = motes;
+        // Hawks: a head a whole block, a longer tail, in the warm color.
+        for m in self.hawks.clone() {
+            let v = (m.vx * m.vx + m.vy * m.vy * 4.0).sqrt().max(1.0);
+            let (ux, uy) = (m.vx / v, m.vy / v);
+            for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                self.dot(m.x + dx, m.y + dy, th.warm, 0.85);
+            }
+            for k in 1..=3 {
+                let k = k as f64 * 1.5;
+                self.dot(m.x - ux * k, m.y - uy * k, th.warm, 0.5 / k);
+            }
+        }
         if let Some(s) = self.streak {
             let fade = 1.0 - s.age / s.life;
             for k in 0..14 {

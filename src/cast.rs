@@ -3,7 +3,6 @@
 //! GIF. Nothing waits: the frames are timed as they would have been. Run
 //! blocks run for real; enter commands don't.
 
-use crate::fx;
 use crate::images::{Pictures, Proto};
 use crate::render::{self, Mode};
 use crate::run;
@@ -22,9 +21,9 @@ pub fn record(talk: &Talk, file: &Path, w: i32, h: i32) -> Result<(), String> {
     s.raw("\x1b[?25l");
     for n in 0..talk.slides.len() {
         let slide = &talk.slides[n];
-        let mode = render::arrive(talk, n);
-        if n > 0 && mode == Mode::Arrive {
-            fx::transition(&mut s, &talk.tr(slide));
+        let mut mode = render::arrive(talk, n);
+        if n > 0 && mode == Mode::Arrive && render::leave(&mut s, talk, n - 1, n) {
+            mode = Mode::Still;
         }
         render::draw(&mut s, talk, &mut pics, n, mode, 0, false);
         s.tick(SLIDE);

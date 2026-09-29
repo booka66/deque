@@ -3,7 +3,7 @@
 
 use crate::markup::{self, Cell, Rgb, Style, Theme};
 use crate::sky::{Kind, Sky};
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use std::io::Write;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
@@ -43,6 +43,14 @@ pub struct Screen {
     born: Instant,
     /// The terminal's font, for text that moves as pictures; see fine.rs.
     pub font: Option<fontdue::Font>,
+    /// When the mouse last moved, on the screen's clock: while it's in use
+    /// there's a sky to draw its light, slide or no.
+    pointed: f64,
+    /// The sky came on over a screen it doesn't know: the slide wants
+    /// drawing again, and till then the sky keeps off it.
+    pub redraw: bool,
+    /// Watchers, with --share: everything drawn goes to them too.
+    pub tap: Option<crate::share::Hub>,
 }
 
 #[derive(Default)]
@@ -105,6 +113,9 @@ impl Screen {
             sky_at: 0.0,
             born: Instant::now(),
             font: None,
+            pointed: f64::NEG_INFINITY,
+            redraw: false,
+            tap: None,
         };
         s.size();
         s
@@ -141,7 +152,7 @@ impl Screen {
     /// The slide's sky. One the same as the last is kept, so it goes on
     /// moving from slide to slide.
     pub fn backdrop(&mut self, kind: Kind, glow: bool) {
-        if kind == Kind::None && !glow {
+        if kind == Kind::None && !glow && !self.pointing() {
             self.sky = None;
             return;
         }
@@ -149,7 +160,67 @@ impl Screen {
             s.glow = glow;
             return;
         }
+        let (pointer, ripples, trail) = self.sky.take().map(|s| (s.pointer, s.ripples, s.trail)).unwrap_or_default();
         self.make_sky(kind, glow);
+        let s = self.sky.as_mut().unwrap();
+        (s.pointer, s.ripples, s.trail) = (pointer, ripples, trail);
+    }
+
+    fn pointing(&self) -> bool {
+        self.now() - self.pointed < 3.0
+    }
+
+    /// The mouse moved to (row, col): the pointer's there.
+    pub fn point(&mut self, row: i32, col: i32) {
+        if self.sky.is_none() {
+            self.keep();
+            self.redraw = true;
+        }
+        self.pointed = self.now();
+        let at = (2.0 * (col - 1) as f64 + 1.0, 2.0 * (row - 1) as f64 + 1.0, self.pointed);
+        let sky = self.sky.as_mut().unwrap();
+        sky.pointer = Some(at);
+        sky.trail.push(at);
+    }
+
+    /// What the mouse did, for the pointer: moving it, or a click.
+    pub fn mouse(&mut self, m: MouseEvent) {
+        let (row, col) = (m.row as i32 + 1, m.column as i32 + 1);
+        match m.kind {
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => self.point(row, col),
+            MouseEventKind::Down(_) => self.click(row, col),
+            _ => {}
+        }
+    }
+
+    /// A click at (row, col): a ring goes out from it.
+    pub fn click(&mut self, row: i32, col: i32) {
+        self.point(row, col);
+        let (x, y, t) = self.sky.as_ref().unwrap().pointer.unwrap();
+        self.sky.as_mut().unwrap().ripples.push((x, y, t));
+    }
+
+    /// What's been put, cell by cell, while the sky keeps it.
+    pub fn cells(&self) -> &[Option<Cell>] {
+        &self.front
+    }
+
+    /// The color behind the cell at (row, col): the sky's there, or the
+    /// background.
+    pub fn under(&self, row: i32, col: i32) -> Rgb {
+        let probe = Cell { ch: 'x', st: Style::default() };
+        match &self.sky {
+            Some(s) if row >= 1 && col >= 1 && row <= self.h && col <= self.w => {
+                s.look((row - 1) as usize, (col - 1) as usize, Some(probe)).st.bg.unwrap_or(self.theme.bg)
+            }
+            _ => self.theme.bg,
+        }
+    }
+
+    /// The sky drawn now, due or not.
+    pub fn sky_now(&mut self) {
+        self.sky_at = f64::NEG_INFINITY;
+        self.sky_frame();
     }
 
     fn make_sky(&mut self, kind: Kind, glow: bool) {
@@ -178,8 +249,9 @@ impl Screen {
     }
 
     pub fn thaw(&mut self) {
+        let pointing = self.pointing();
         match self.sky.as_mut() {
-            Some(s) if s.kind == Kind::None && !s.glow => self.sky = None,
+            Some(s) if s.kind == Kind::None && !s.glow && !pointing => self.sky = None,
             Some(s) => s.thaw(),
             None => {}
         }
@@ -191,7 +263,7 @@ impl Screen {
         let fps = if self.rec.is_some() { 15.0 } else { 30.0 };
         let now = self.now();
         let Some(sky) = self.sky.as_mut() else { return };
-        if now - self.sky_at < 1.0 / fps - 1e-6 {
+        if self.redraw || now - self.sky_at < 1.0 / fps - 1e-6 {
             return;
         }
         self.sky_at = now;
@@ -295,6 +367,11 @@ impl Screen {
         let mut o = std::io::stdout().lock();
         let _ = o.write_all(&self.out);
         let _ = o.flush();
+        if let Some(t) = &self.tap
+            && !self.out.is_empty()
+        {
+            t.send(&self.out, self.w, self.h);
+        }
         self.out.clear();
     }
 
@@ -380,6 +457,7 @@ impl Screen {
     }
 
     pub fn clear(&mut self) {
+        self.redraw = false;
         if self.kitty {
             self.raw("\x1b_Ga=d,d=a,q=2\x1b\\");
         }
@@ -469,6 +547,7 @@ impl Screen {
                     return;
                 }
                 Ok(Event::Resize(..)) => self.resized = true,
+                Ok(Event::Mouse(m)) => self.mouse(m),
                 _ => {}
             }
         }

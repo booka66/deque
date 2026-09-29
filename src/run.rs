@@ -130,6 +130,7 @@ pub fn go(s: &mut Screen, talk: &Talk, n: usize) -> Output {
                     break;
                 }
                 Ok(Event::Resize(..)) => s.resized = true,
+                Ok(Event::Mouse(m)) => s.mouse(m),
                 _ => {}
             }
         }

@@ -324,6 +324,42 @@ sky: life
 {muted}also: snow, rain · drawn a quarter of a cell at a time{/}
 
 ---
+sky: boids
+
+## skies · boids
+# BOIDS
+`sky: boids`
+
+a flock, swerving round the words
+
+---
+sky: fireflies
+
+## skies · fireflies
+# GLOW
+`sky: fireflies`
+
+a few warm lights, now and then lit
+
+---
+tr: life
+
+## transitions · life
+# LIFE
+`tr: life`
+
+the slide before became Conway's Game of Life and died out
+
+---
+tr: focus
+
+## transitions · focus
+# FOCUS
+`tr: focus`
+
+the slide before melted into a blur, and this one came out of it
+
+---
 tr: dissolve
 
 ## transitions · dissolve

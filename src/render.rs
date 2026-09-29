@@ -465,16 +465,207 @@ pub fn overview(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
     got
 }
 
-/// Slide k drawn whole and frozen behind the list, frosted.
-fn behind(s: &mut Screen, talk: &Talk, k: usize) {
+/// The slide before, `from`, going as slide n's `tr:` says: true when that
+/// brought n in whole, as focus does, so it needn't arrive again.
+pub fn leave(s: &mut Screen, talk: &Talk, from: usize, n: usize) -> bool {
+    match talk.tr(&talk.slides[n]).as_str() {
+        "life" => {
+            still(s, talk, from);
+            let cells = s.cells().to_vec();
+            crate::life::play(s, &cells);
+            false
+        }
+        "focus" => pull(s, talk, from, n),
+        t => {
+            fx::transition(s, t);
+            false
+        }
+    }
+}
+
+/// Slide k whole, with the screen kept cell by cell, to be read back.
+fn still(s: &mut Screen, talk: &Talk, k: usize) {
     let slide = &talk.slides[k];
-    s.thaw();
     s.keep();
     match &slide.draw {
         _ if !slide.images.is_empty() => s.clear(),
         Some(d) => drawn(s, talk, k, d, Mode::Still, slide.steps()),
         None => text(s, talk, k, Mode::Still, slide.steps()),
     }
+}
+
+/// tr: focus. The slide before melts into frost; the frost turns into
+/// slide n's, blurred; then n comes into focus out of it. For text slides:
+/// the others arrive as usual after the melt.
+fn pull(s: &mut Screen, talk: &Talk, from: usize, n: usize) -> bool {
+    let slide = &talk.slides[n];
+    still(s, talk, from);
+    s.frost();
+    let old = s.sky.as_mut().and_then(|k| k.take_frost()).unwrap_or_default();
+    still(s, talk, n);
+    s.frost();
+    let new = s.sky.as_mut().and_then(|k| k.take_frost()).unwrap_or_default();
+    let parts = if slide.images.is_empty() && slide.draw.is_none() { placed(s, talk, n, 0, false) } else { vec![] };
+    s.clear();
+    let fg = s.theme.fg;
+    let smooth = |t: f64| {
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let frames = 36;
+    for f in 0..=frames {
+        if s.hurry {
+            break;
+        }
+        let t = f as f64 / frames as f64;
+        // The old frost into the new, then the new clearing as the text
+        // sharpens over it.
+        let (k, keep) = (smooth(t / 0.5), 1.0 - smooth((t - 0.45) / 0.55));
+        let mix: Vec<_> = old.iter().zip(&new).map(|(a, b)| (a.0.mix(b.0, k), (a.1 + (b.1 - a.1) * k) * keep)).collect();
+        if let Some(sky) = s.sky.as_mut() {
+            sky.set_frost(mix);
+        }
+        s.raw("\x1b[?2026h");
+        // The text up out of the blur behind it, not out of the dark.
+        s.sky_now();
+        let sharp = smooth((t - 0.45) / 0.55);
+        if sharp > 0.0 {
+            for (r, c, l, _) in &parts {
+                let mut col = *c;
+                let lit: Line = l
+                    .iter()
+                    .map(|x| {
+                        let behind = s.under(*r, col);
+                        col += 1;
+                        Cell { ch: x.ch, st: Style { fg: Some(behind.mix(x.st.fg.unwrap_or(fg), sharp)), ..x.st } }
+                    })
+                    .collect();
+                s.put(*r, *c, &lit);
+            }
+        }
+        s.raw("\x1b[?2026l");
+        s.tick(0.016);
+    }
+    s.thaw();
+    !parts.is_empty()
+}
+
+/// For watchers: how to watch, on a card over the slide frosted, a QR code
+/// for phones, the link and the command, till a key.
+pub fn watch(s: &mut Screen, talk: &Talk, n: usize, url: &str, cmd: Option<&str>) {
+    use crossterm::event::{self, Event, KeyEventKind};
+    use std::time::Duration;
+    let copied = clip(s, url);
+    let mut shown = None;
+    loop {
+        if shown != Some((s.w, s.h)) {
+            shown = Some((s.w, s.h));
+            s.raw("\x1b[?2026h");
+            behind(s, talk, n);
+            s.clear();
+            card(s, url, cmd, copied);
+            s.raw("\x1b[?2026l");
+            s.flush();
+        }
+        if !event::poll(Duration::from_millis(15)).unwrap_or(false) {
+            s.sky_frame();
+            s.flush();
+            continue;
+        }
+        match event::read() {
+            Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => break,
+            Ok(Event::Resize(..)) => s.size(),
+            Ok(Event::Mouse(m)) => s.mouse(m),
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    s.thaw();
+}
+
+/// The QR code, two modules a cell down, a quiet zone round it, black on
+/// white whatever the talk's colors, for cameras to read.
+fn qr(url: &str) -> Vec<Line> {
+    let Ok(code) = qrcode::QrCode::new(url.as_bytes()) else { return vec![] };
+    let w = code.width();
+    let dark = code.to_colors();
+    let q = 2;
+    let at = |x: isize, y: isize| {
+        let (x, y) = (x - q, y - q);
+        x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < w && dark[y as usize * w + x as usize] == qrcode::Color::Dark
+    };
+    let (black, white) = (markup::Rgb(0, 0, 0), markup::Rgb(255, 255, 255));
+    let side = w as isize + 2 * q;
+    (0..side)
+        .step_by(2)
+        .map(|y| {
+            (0..side)
+                .map(|x| {
+                    let c = |d: bool| if d { black } else { white };
+                    Cell { ch: '▀', st: Style { fg: Some(c(at(x, y))), bg: Some(c(y + 1 < side && at(x, y + 1))), bold: false } }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The link onto the clipboard: by the system's own tool, which says
+/// whether it worked, or failing that by asking the terminal (OSC 52),
+/// which doesn't. Watchers never get the asking; it isn't drawing.
+fn clip(s: &mut Screen, text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let tools: &[&[&str]] = if cfg!(target_os = "macos") {
+        &[&["pbcopy"]]
+    } else if cfg!(windows) {
+        &[&["clip"]]
+    } else {
+        &[&["wl-copy"], &["xclip", "-selection", "clipboard"], &["xsel", "--clipboard", "--input"]]
+    };
+    for t in tools {
+        let Ok(mut c) = Command::new(t[0]).args(&t[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { continue };
+        let fed = c.stdin.take().is_some_and(|mut i| i.write_all(text.as_bytes()).is_ok());
+        if c.wait().is_ok_and(|st| st.success()) && fed {
+            return true;
+        }
+    }
+    use base64::Engine;
+    s.raw(&format!("\x1b]52;c;{}\x07", base64::engine::general_purpose::STANDARD.encode(text)));
+    false
+}
+
+fn card(s: &mut Screen, url: &str, cmd: Option<&str>, copied: bool) {
+    let code = qr(url);
+    let (acc, mt, fg) = (s.accent(), s.muted(), Style::fg(s.theme.fg));
+    let mut lines: Vec<Line> = vec![markup::plain("can't see the screen? watch along", Style { bold: true, ..acc }), vec![]];
+    // The code only where it fits, with the words under it.
+    if code.len() as i32 + 8 <= s.h {
+        lines.extend(code);
+        lines.push(vec![]);
+    }
+    let mut row = |label: &str, what: &str| {
+        let mut l = markup::plain(label, mt);
+        l.extend(markup::plain(what, fg));
+        lines.push(l);
+    };
+    row("open  ", url);
+    if let Some(cmd) = cmd {
+        row("or run  ", cmd);
+    }
+    if copied {
+        lines.push(vec![]);
+        lines.push(markup::plain("link copied", mt));
+    }
+    let top = ((s.h - lines.len() as i32) / 2).max(1);
+    for (i, l) in lines.iter().enumerate() {
+        s.put(top + i as i32, s.mid(markup::width(l)), l);
+    }
+}
+
+/// Slide k drawn whole and frozen behind the list, frosted.
+fn behind(s: &mut Screen, talk: &Talk, k: usize) {
+    s.thaw();
+    still(s, talk, k);
     s.frost();
 }
 
@@ -517,6 +708,7 @@ fn pick(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
                 _ => {}
             },
             Event::Resize(..) => s.size(),
+            Event::Mouse(m) => s.mouse(m),
             _ => {}
         }
         sel = sel.clamp(0, total - 1);

@@ -41,6 +41,8 @@ pub const TR: &[Named] = &[
     ("sweep", "a bar crosses the screen, leaving it empty"),
     ("curtain", "bars from both sides, meeting in the middle"),
     ("morph", "the slide before turns into this one: its words, code and headline swing to their new places"),
+    ("life", "the slide before becomes Conway's Game of Life and dies out"),
+    ("focus", "the slide before melts into a blur, and this one comes into focus out of it"),
     ("none", "straight to the next slide (the default)"),
 ];
 
@@ -50,6 +52,8 @@ pub const SKY: &[Named] = &[
     ("rain", "rain streaking down"),
     ("embers", "sparks rising from the bottom, flickering out"),
     ("life", "Conway's Game of Life, faint, never settling"),
+    ("boids", "a flock of birds wheeling about, swerving round the text, the pointer, and the two hawks hunting them"),
+    ("fireflies", "a few warm lights drifting, now and then lit"),
     ("none", "the terminal's own background (the default)"),
 ];
 

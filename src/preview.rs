@@ -5,7 +5,6 @@
 //! buffer, saved or not. Pictures are found beside TALK. Without --from, it
 //! follows TALK itself.
 
-use crate::fx;
 use crate::images;
 use crate::markup::Style;
 use crate::render::{self, Mode};
@@ -87,9 +86,11 @@ pub fn run(path: &Path, from: Option<&Path>, still: bool) -> Result<(), String> 
                         s.hurry = false;
                         // A slide whose code turns into the next's shows it
                         // turning, from wherever the cursor came.
-                        let mode = render::arrive(t, n);
-                        if mode == Mode::Arrive && showing.is_some_and(|(was, _)| was != n) {
-                            fx::transition(&mut s, &t.tr(&t.slides[n]));
+                        let mut mode = render::arrive(t, n);
+                        if let Some((was, _)) = showing.filter(|&(was, _)| mode == Mode::Arrive && was != n)
+                            && render::leave(&mut s, t, was.min(t.slides.len() - 1), n)
+                        {
+                            mode = Mode::Still;
                         }
                         render::draw(&mut s, t, &mut pics, n, mode, 0, false);
                         for k in 1..=steps {
