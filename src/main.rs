@@ -52,11 +52,17 @@ deque: slides in your terminal
   deque lsp            the language server, for editors
 
   --cursor, --no-cursor   show or hide the cursor (the talk's `cursor:` otherwise)
+  --calm                  nothing moves that needn't: no skies, glow,
+                          flourishes, transitions or morphs (as calm: on)
   --share                 stream it live on the network, for anyone who can't
-                          see, in a browser: w shows the link and a QR code;
-                          a slide can say ${DEQUE_URL}
+                          see, in a browser, over HTTPS (browsers warn once:
+                          the certificate is deque's own): w shows the link
+                          and a QR code; a slide can say ${DEQUE_URL}
   --share-curl            --share, and offer curl -sN to watch in a terminal
                           too; plain HTTP, so for networks you trust
+                          P shows your phone remote: next, back, notes, and a
+                          pointer, by finger or by aiming the phone; just for
+                          you, not the room
   --share-no-font         --share, but the page draws in its own monospace,
                           not the terminal's font (DEQUE_FACE, or its config)
 
@@ -158,10 +164,16 @@ fn modified(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
+/// When the talk, and each file its code comes from, last changed.
+fn stamps(p: &Path, talk: &Talk) -> Vec<Option<SystemTime>> {
+    std::iter::once(p).chain(talk.files.iter().map(PathBuf::as_path)).map(modified).collect()
+}
+
 fn present(args: &[String]) -> Result<(), String> {
     let mut path: Option<PathBuf> = None;
     let (mut start, mut print, mut tv, mut cursor, mut sharing, mut curl) = (1usize, false, false, None, false, false);
     let mut own_font = true;
+    let mut calm = false;
     let (mut cast, mut size) = (None, (100, 30));
     let mut rest = vec![];
     let mut it = args.iter();
@@ -181,6 +193,7 @@ fn present(args: &[String]) -> Result<(), String> {
             "--cursor" => cursor = Some(true),
             "--no-cursor" => cursor = Some(false),
             "--share" => sharing = true,
+            "--calm" => calm = true,
             "--share-curl" => (sharing, curl) = (true, true),
             "--share-no-font" => (sharing, own_font) = (true, false),
             _ if a.starts_with('-') => return Err(format!("deque: no option {a}\n\n{HELP}\n")),
@@ -205,6 +218,7 @@ fn present(args: &[String]) -> Result<(), String> {
         }
     }
     let mut talk = load(&path, false)?;
+    talk.calm |= calm;
     if print {
         print!("{}", render::print_all(&talk, std::io::stdout().is_terminal()));
         return Ok(());
@@ -234,7 +248,7 @@ fn present(args: &[String]) -> Result<(), String> {
     let proto = images::detect();
     // The terminal's own background, for a talk that doesn't say.
     let term_bg = images::background();
-    adopt(&mut talk, term_bg);
+    adopt(&mut talk, term_bg, calm);
     s.theme = talk.theme.clone();
     s.kitty = proto == images::Proto::Kitty;
     // Watchers can't be sent pictures of moving text; with them, it smears.
@@ -261,10 +275,13 @@ fn present(args: &[String]) -> Result<(), String> {
 
     let mut n = start.clamp(1, talk.slides.len()) - 1;
     let (mut mode, mut shown, mut started) = (Mode::Arrive, 0usize, false);
-    let mut stamp = modified(&path);
+    let mut stamp = stamps(&path, &talk);
     let mut src = std::fs::read_to_string(&path).unwrap_or_default();
     let mut problem: Option<String> = None;
     let mut link = link::Link::new(&path);
+    if let Some(sh) = &share {
+        link.publish_remote(&sh.remote);
+    }
     // A slide number being typed, to go to on enter.
     let mut jump = String::new();
     // The slide on the screen before this one, for the way out of it.
@@ -277,6 +294,9 @@ fn present(args: &[String]) -> Result<(), String> {
         // Before the slide plays in, so the notes change with the key, not
         // after the animation.
         link.publish(n, shown);
+        if let Some(sh) = &share {
+            sh.hub.state(state(&talk, n, shown, &s));
+        }
         if mode == Mode::Arrive && started && render::leave(&mut s, &talk, was.min(talk.slides.len() - 1), n) {
             mode = Mode::Still;
         }
@@ -324,7 +344,8 @@ fn present(args: &[String]) -> Result<(), String> {
                 }
                 s.sky_frame();
                 s.flush();
-                if let Some(c) = link.take() {
+                s.steer();
+                if let Some(c) = link.take().or_else(|| share.as_ref().and_then(|sh| sh.hub.take())) {
                     break match c.split_once(' ') {
                         Some(("goto", k)) => k.parse().map_or(Act::Redraw, Act::Goto),
                         _ => match c.as_str() {
@@ -337,7 +358,7 @@ fn present(args: &[String]) -> Result<(), String> {
                         },
                     };
                 }
-                let now = modified(&path);
+                let now = stamps(&path, &talk);
                 if now != stamp {
                     stamp = now;
                     let new = std::fs::read_to_string(&path).unwrap_or_default();
@@ -347,7 +368,8 @@ fn present(args: &[String]) -> Result<(), String> {
                             // beside the editor, as a preview.
                             let edited = changed(&src, &talk, &new, &t);
                             talk = t;
-                            adopt(&mut talk, term_bg);
+                            adopt(&mut talk, term_bg, calm);
+                            stamp = stamps(&path, &talk);
                             src = new;
                             ran.clear();
                             if let Some(sh) = &share {
@@ -415,6 +437,11 @@ fn present(args: &[String]) -> Result<(), String> {
                     render::watch(&mut s, &talk, n, &sh.url, sh.curl.as_deref());
                 }
             }
+            Act::Remote => {
+                if let Some(sh) = &share {
+                    render::remote(&mut s, &talk, n, &sh.remote);
+                }
+            }
             Act::Next if shown < steps => (shown, mode) = (shown + 1, Mode::Step),
             Act::Next if n < last => (n, shown, mode) = (n + 1, 0, render::arrive(&talk, n + 1)),
             _ => {}
@@ -441,6 +468,7 @@ enum Act {
     Live,
     Overview,
     Watch,
+    Remote,
     Grow(i32),
     Digit(char),
     Erase,
@@ -459,6 +487,7 @@ fn act(k: KeyEvent) -> Act {
         KeyCode::Char('r') => Act::Replay,
         KeyCode::Char('o') | KeyCode::Tab => Act::Overview,
         KeyCode::Char('w') => Act::Watch,
+        KeyCode::Char('P') => Act::Remote,
         KeyCode::Char(d) if d.is_ascii_digit() => Act::Digit(d),
         KeyCode::Backspace => Act::Erase,
         KeyCode::Enter | KeyCode::Char(' ') => Act::Live,
@@ -526,8 +555,29 @@ fn live(s: &mut Screen, talk: &Talk, slide: &talk::Slide, font: Option<&ghostty:
     s.size();
 }
 
-/// The terminal's background for the talk's, unless the talk set its own.
-fn adopt(talk: &mut Talk, bg: Option<markup::Rgb>) {
+/// Where the talk is, for the phone remote: the slide, its step, its
+/// title and notes, what's next, and the screen's shape.
+fn state(talk: &Talk, n: usize, shown: usize, s: &Screen) -> String {
+    let slide = &talk.slides[n];
+    let next = talk.slides.get(n + 1).map(|x| x.title());
+    serde_json::json!({
+        "n": n + 1,
+        "total": talk.slides.len(),
+        "shown": shown,
+        "steps": slide.steps(),
+        "title": slide.title(),
+        "notes": slide.notes,
+        "next": if shown < slide.steps() { Some("next step".to_string()) } else { next },
+        "w": s.w,
+        "h": s.h,
+    })
+    .to_string()
+}
+
+/// The terminal's background for the talk's, unless the talk set its own;
+/// and calm, when asked for.
+fn adopt(talk: &mut Talk, bg: Option<markup::Rgb>, calm: bool) {
+    talk.calm |= calm;
     if let Some(c) = bg.filter(|_| !talk.theme.bg_given) {
         talk.theme.bg = c;
     }

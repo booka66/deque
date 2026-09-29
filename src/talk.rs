@@ -38,6 +38,45 @@ pub struct Body {
     pub step: usize,
     /// Whether it's a line of a ```lang block.
     pub code: bool,
+    /// A ```chart line's bar, to grow in.
+    pub bar: Option<Bar>,
+}
+
+/// A bar of a ```chart block: the label before it, how full it is, how
+/// many cells it has at most, and the value after it.
+#[derive(Clone, Debug)]
+pub struct Bar {
+    pub lead: Line,
+    pub frac: f64,
+    pub width: usize,
+    pub tail: Line,
+}
+
+impl Bar {
+    /// The line with the bar k of the way grown, to an eighth of a cell.
+    pub fn line(&self, k: f64, st: Style) -> Line {
+        const PART: [char; 7] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+        let eighths = (self.frac * k.clamp(0.0, 1.0) * self.width as f64 * 8.0).round() as usize;
+        let mut bar: String = "█".repeat(eighths / 8);
+        if !eighths.is_multiple_of(8) {
+            bar.push(PART[eighths % 8 - 1]);
+        }
+        let pad = self.width - bar.chars().count();
+        let mut l = self.lead.clone();
+        l.extend(markup::plain(&bar, st));
+        l.extend(markup::plain(&" ".repeat(pad), Style::default()));
+        l.extend(self.tail.iter().copied());
+        l
+    }
+}
+
+/// A ```lang focus: step: on it, the block's lines but these dim.
+#[derive(Clone, Debug)]
+pub struct Focus {
+    pub step: usize,
+    /// The block's lines in the body, and those lit.
+    pub block: std::ops::Range<usize>,
+    pub lines: Vec<usize>,
 }
 
 /// A ```lang run block: what runs it, and when.
@@ -96,6 +135,9 @@ pub struct Slide {
     /// The language of its first ```lang block.
     pub lang: Option<String>,
     pub run: Option<Run>,
+    pub focus: Vec<Focus>,
+    /// How long it's meant to be up, in seconds, for pacing.
+    pub time: Option<u32>,
     /// Its speaker notes, the `//` lines.
     pub notes: Vec<String>,
 }
@@ -121,7 +163,10 @@ impl Slide {
     pub fn steps(&self) -> usize {
         match &self.draw {
             Some(d) => d.groups.len() - 1,
-            None => self.body.iter().map(|b| b.step).chain(self.run.as_ref().map(|r| r.step)).max().unwrap_or(0),
+            None => {
+                let (run, focus) = (self.run.as_ref().map(|r| r.step), self.focus.iter().map(|f| f.step));
+                self.body.iter().map(|b| b.step).chain(run).chain(focus).max().unwrap_or(0)
+            }
         }
     }
 }
@@ -131,33 +176,56 @@ pub struct Talk {
     pub theme: Theme,
     pub fx: Effects,
     pub cursor: bool,
+    /// calm: on, or --calm: nothing moves that needn't. No skies, glow,
+    /// flourishes, transitions or morphs; what arrives fades in.
+    pub calm: bool,
     pub slides: Vec<Slide>,
     pub dir: PathBuf,
     /// The environment variables it reads, for --tv to take along.
     pub vars: Vec<String>,
+    /// The files its code comes from, to read again when they change.
+    pub files: Vec<PathBuf>,
 }
 
 impl Talk {
     pub fn fx(&self, s: &Slide) -> String {
+        if self.calm {
+            return "fade".into();
+        }
         s.fx.fx.clone().or(self.fx.fx.clone()).unwrap_or("wipe".into())
     }
     pub fn lines(&self, s: &Slide) -> String {
+        if self.calm {
+            return "fade".into();
+        }
         s.fx.lines.clone().or(self.fx.lines.clone()).unwrap_or("type".into())
     }
     pub fn reveal(&self, s: &Slide) -> String {
+        if self.calm {
+            return "fade".into();
+        }
         s.fx.reveal.clone().or(self.fx.reveal.clone()).unwrap_or("glide".into())
     }
     pub fn then(&self, s: &Slide) -> Vec<String> {
+        if self.calm {
+            return vec![];
+        }
         s.fx.then.clone().or(self.fx.then.clone()).unwrap_or_default()
     }
     pub fn tr(&self, s: &Slide) -> String {
+        if self.calm {
+            return "none".into();
+        }
         s.fx.tr.clone().or(self.fx.tr.clone()).unwrap_or("none".into())
     }
     pub fn sky(&self, s: &Slide) -> String {
+        if self.calm {
+            return "none".into();
+        }
         s.fx.sky.clone().or(self.fx.sky.clone()).unwrap_or("none".into())
     }
     pub fn glow(&self, s: &Slide) -> bool {
-        s.fx.glow.clone().or(self.fx.glow.clone()).is_some_and(|g| g == "on")
+        !self.calm && s.fx.glow.clone().or(self.fx.glow.clone()).is_some_and(|g| g == "on")
     }
     /// Whether slide `to` arrives from `from` by turning into it: all of
     /// it with `tr: morph`, or its code, when both have code in the same
@@ -165,7 +233,7 @@ impl Talk {
     pub fn morphs(&self, from: usize, to: usize) -> bool {
         let text = |s: &Slide| s.images.is_empty() && s.draw.is_none();
         let (a, b) = (&self.slides[from], &self.slides[to]);
-        if !text(a) || !text(b) {
+        if self.calm || !text(a) || !text(b) {
             return false;
         }
         self.tr(b) == "morph" || (a.lang.is_some() && a.lang == b.lang && b.fx.tr.is_none())
@@ -211,6 +279,7 @@ fn image_line(l: &str) -> Option<Vec<(String, String)>> {
 }
 
 struct P<'a> {
+    files: Vec<PathBuf>,
     diags: Vec<Diag>,
     theme: Theme,
     vars: Vec<String>,
@@ -305,9 +374,10 @@ impl P<'_> {
 }
 
 pub fn parse(src: &str, dir: &Path, lenient: bool) -> (Talk, Vec<Diag>) {
-    let mut p = P { diags: vec![], theme: Theme::default(), vars: vec![], lenient, dir, n: 0 };
+    let mut p = P { files: vec![], diags: vec![], theme: Theme::default(), vars: vec![], lenient, dir, n: 0 };
     let mut talk_fx = Effects::default();
     let mut cursor = true;
+    let mut calm = false;
     let lines: Vec<&str> = src.lines().collect();
     let mut i = 0;
     if lines.first().is_some_and(|l| l.starts_with("#!")) {
@@ -335,6 +405,11 @@ pub fn parse(src: &str, dir: &Path, lenient: bool) -> (Talk, Vec<Diag>) {
                 "on" | "yes" | "true" => cursor = true,
                 "off" | "no" | "false" => cursor = false,
                 _ => p.err(col, l.chars().count(), "cursor is on or off"),
+            },
+            "calm" => match v.as_str() {
+                "on" | "yes" | "true" => calm = true,
+                "off" | "no" | "false" => calm = false,
+                _ => p.err(col, l.chars().count(), "calm is on or off"),
             },
             _ if spec::find(spec::TALK, k).is_some() => match Rgb::parse(&v) {
                 Some(c) => {
@@ -367,7 +442,7 @@ pub fn parse(src: &str, dir: &Path, lenient: bool) -> (Talk, Vec<Diag>) {
         p.n = lines.len().saturating_sub(1);
         p.err(0, 0, "no slides: a slide starts at a line of `---`");
     }
-    let talk = Talk { theme: p.theme.clone(), fx: talk_fx, cursor, slides, dir: dir.to_path_buf(), vars: p.vars.clone() };
+    let talk = Talk { theme: p.theme.clone(), fx: talk_fx, cursor, calm, slides, dir: dir.to_path_buf(), vars: p.vars.clone(), files: p.files.clone() };
     (talk, p.diags)
 }
 
@@ -402,6 +477,10 @@ fn slide(p: &mut P, lines: &[&str], start: usize, end: usize) -> Slide {
             "cols" => match v.parse() {
                 Ok(n) if n >= 20 => s.cols = Some(n),
                 _ => p.err(col, l.chars().count(), "cols is a number of columns, 20 or more"),
+            },
+            "time" => match seconds(&v) {
+                Some(t) => s.time = Some(t),
+                None => p.err(col, l.chars().count(), "time is how long the slide's meant to be up: 90s, 2m, 1m30s"),
             },
             "draw" => match v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
                 Some((w, h)) => draw_size = Some((w, h)),
@@ -460,62 +539,213 @@ struct Block {
     code: bool,
     /// For a ```lang run block, what runs it.
     run: Option<Vec<String>>,
+    /// For a ```chart block, each line's bar.
+    bars: Vec<Option<Bar>>,
+    /// For a ```lang focus: block, the lines lit on each step, from 0.
+    focus: Vec<Vec<usize>>,
+}
+
+/// A ``` block being read: what its opening line said, where its lines
+/// start, and its lines so far.
+struct Open {
+    lang: String,
+    run: Option<[&'static str; 2]>,
+    /// Lines from a file instead of its own.
+    file: Option<Vec<String>>,
+    /// The focus: groups as written, from 1.
+    focus: Vec<Vec<usize>>,
+    at: usize,
+    src: Vec<String>,
+}
+
+/// "90", "90s", "2m", "1m30s": seconds.
+fn seconds(v: &str) -> Option<u32> {
+    let (mut total, mut num) = (0u32, String::new());
+    for c in v.trim().chars() {
+        match c {
+            '0'..='9' => num.push(c),
+            'm' | 's' => {
+                let n: u32 = num.parse().ok()?;
+                total += if c == 'm' { n * 60 } else { n };
+                num.clear();
+            }
+            _ => return None,
+        }
+    }
+    if !num.is_empty() {
+        total += num.parse::<u32>().ok()?;
+    }
+    (total > 0).then_some(total)
+}
+
+/// `2|4-5,8`: the groups, each lines and ranges of them, from 1.
+fn groups(spec: &str) -> Option<Vec<Vec<usize>>> {
+    spec.split('|')
+        .map(|g| {
+            let mut out = vec![];
+            for part in g.split(',') {
+                match part.split_once('-') {
+                    Some((a, b)) => out.extend(a.trim().parse::<usize>().ok()?..=b.trim().parse::<usize>().ok()?),
+                    None => out.push(part.trim().parse().ok()?),
+                }
+            }
+            Some(out)
+        })
+        .collect()
+}
+
+/// A file's lines for a block: `path:10-24` those, `path#name` the lines
+/// from the first holding `name` through the end of what's indented under
+/// it (and its closing bracket), dedented.
+fn excerpt(text: &str, sel: Option<&str>) -> Result<Vec<String>, String> {
+    let all: Vec<&str> = text.lines().collect();
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let got: Vec<&str> = match sel {
+        None => all.clone(),
+        Some(r) if r.starts_with(':') => {
+            let (a, b) = r[1..].split_once('-').unwrap_or((&r[1..], &r[1..]));
+            let (a, b): (usize, usize) = (a.parse().map_err(|_| "lines are :FROM-TO, like :10-24")?, b.parse().map_err(|_| "lines are :FROM-TO, like :10-24")?);
+            if a < 1 || b < a || b > all.len() {
+                return Err(format!("lines {a}-{b}, but the file has {}", all.len()));
+            }
+            all[a - 1..b].to_vec()
+        }
+        Some(r) => {
+            let name = &r[1..];
+            // The name as a whole word: #fee finds `fn fee(`, not `fees`.
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            let has = |l: &str| {
+                l.match_indices(name).any(|(i, _)| {
+                    !l[..i].chars().next_back().is_some_and(word) && !l[i + name.len()..].chars().next().is_some_and(word)
+                })
+            };
+            let start = all.iter().position(|l| has(l)).ok_or(format!("no line with \"{name}\" in it"))?;
+            let i0 = indent(all[start]);
+            let mut end = start + 1;
+            while end < all.len() && (all[end].trim().is_empty() || indent(all[end]) > i0) {
+                end += 1;
+            }
+            // Its closing bracket, at its own indentation.
+            if end < all.len() && indent(all[end]) == i0 && all[end].trim_start().starts_with(['}', ')', ']']) {
+                end += 1;
+            }
+            while end > start + 1 && all[end - 1].trim().is_empty() {
+                end -= 1;
+            }
+            all[start..end].to_vec()
+        }
+    };
+    let cut = got.iter().filter(|l| !l.trim().is_empty()).map(|l| indent(l)).min().unwrap_or(0);
+    Ok(got.iter().map(|l| l.get(cut..).unwrap_or("").to_string()).collect())
+}
+
+/// A ```chart line: a label, then a number, as it's to be shown.
+fn chart_line(l: &str) -> Option<(String, String, f64)> {
+    let l = l.trim();
+    let (label, value) = l.rsplit_once(char::is_whitespace)?;
+    let v: f64 = value.trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-').replace(',', "").parse().ok()?;
+    Some((label.trim().to_string(), value.to_string(), v))
+}
+
+/// Markdown table rows as lines: columns lined up, numbers to the right,
+/// the header bold with a rule under it.
+fn table(p: &mut P, rows: &[(usize, &str)]) -> Block {
+    let cells = |l: &str| -> Vec<String> {
+        let t = l.trim();
+        let t = t.strip_prefix('|').unwrap_or(t);
+        let t = t.strip_suffix('|').unwrap_or(t);
+        t.split('|').map(|c| c.trim().to_string()).collect()
+    };
+    let rule = |c: &[String]| c.iter().all(|x| !x.is_empty() && x.trim_matches(':').chars().all(|ch| ch == '-'));
+    let mut head = 0;
+    let mut grid: Vec<(usize, Vec<Line>)> = vec![];
+    for &(n, l) in rows {
+        let c = cells(l);
+        if rule(&c) && head == 0 {
+            head = grid.len();
+            continue;
+        }
+        p.n = n;
+        let lines = c.iter().map(|x| p.markup(x, 0)).collect();
+        grid.push((n, lines));
+    }
+    let cols = grid.iter().map(|(_, r)| r.len()).max().unwrap_or(0);
+    let width = |k: usize| grid.iter().filter_map(|(_, r)| r.get(k)).map(|l| markup::width(l)).max().unwrap_or(0);
+    let widths: Vec<i32> = (0..cols).map(width).collect();
+    let number = |k: usize| {
+        grid.iter().skip(head).filter_map(|(_, r)| r.get(k)).all(|l| {
+            let t = markup::text(l);
+            let t = t.trim().trim_matches(|c: char| "$%€£".contains(c)).replace(',', "");
+            t.is_empty() || t.parse::<f64>().is_ok()
+        })
+    };
+    let right: Vec<bool> = (0..cols).map(number).collect();
+    let mut b = Block::default();
+    for (i, (n, r)) in grid.iter().enumerate() {
+        let mut line = Line::new();
+        for k in 0..cols {
+            let empty = Line::new();
+            let cell = r.get(k).unwrap_or(&empty);
+            let cell: Line = if i < head { cell.iter().map(|c| markup::Cell { ch: c.ch, st: Style { bold: true, ..c.st } }).collect() } else { cell.clone() };
+            let pad = markup::plain(&" ".repeat((widths[k] - markup::width(&cell)) as usize), Style::default());
+            if k > 0 {
+                line.extend(markup::plain("   ", Style::default()));
+            }
+            if right[k] && i >= head {
+                line.extend(pad);
+                line.extend(cell);
+            } else {
+                line.extend(cell);
+                line.extend(pad);
+            }
+        }
+        b.lines.push((false, line, *n));
+        if i + 1 == head {
+            let total = widths.iter().sum::<i32>() + 3 * (cols as i32 - 1).max(0);
+            b.lines.push((false, markup::plain(&"─".repeat(total.max(0) as usize), Style::fg(p.theme.muted)), *n));
+        }
+    }
+    b
 }
 
 fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
     let mut blocks: Vec<Block> = vec![];
     let mut fence: Option<usize> = None;
-    // Inside ```lang: the language, whether it runs, the line after the ```,
-    // and the lines so far, as they are.
-    let mut code: Option<(String, Option<[&str; 2]>, usize, Vec<String>)> = None;
+    // Inside ```lang: what the opening line said, and the lines so far.
+    let mut code: Option<Open> = None;
+    // Markdown table rows, till a line that isn't one.
+    let mut rows: Vec<(usize, &str)> = vec![];
     for i in from..end {
         p.n = i;
         let l = lines[i];
+        let row = fence.is_none() && l.trim_start().starts_with('|');
+        if !row && !rows.is_empty() {
+            blocks.push(table(p, &rows));
+            rows.clear();
+            p.n = i;
+        }
+        if row {
+            rows.push((i, l));
+            continue;
+        }
         if let Some(info) = l.trim_start().strip_prefix("```") {
-            let mut words = info.split_whitespace();
-            let lang = words.next().unwrap_or("");
             match fence {
                 None => {
                     fence = Some(i);
                     blocks.push(Block::default());
-                    if !lang.is_empty() {
-                        if !code::known(lang) {
-                            let at = l.find(lang).unwrap_or(0);
-                            p.err(at, at + lang.len(), format!("no language \"{lang}\"; try ts, tsx, js, rs, py, go, sh, json, yaml, sql, diff"));
-                        }
-                        let mut run = None;
-                        if let Some(w) = words.next() {
-                            let at = l.rfind(w).unwrap_or(0);
-                            if w != "run" {
-                                p.err(at, at + w.len(), format!("after the language goes `run`, or nothing; not \"{w}\""));
-                            } else if blocks.iter().any(|b| b.run.is_some()) {
-                                p.err(at, at + w.len(), "a second block that runs; a slide has one");
-                            } else {
-                                run = runner(lang);
-                                if run.is_none() {
-                                    p.err(at, at + w.len(), format!("deque can't run {lang}: sh, bash, zsh, fish, py, js and rb run"));
-                                }
-                            }
-                        }
-                        code = Some((lang.to_string(), run, i + 1, vec![]));
-                    }
+                    code = open(p, l, info, i, blocks.iter().any(|b| b.run.is_some()));
                 }
-                Some(_) => {
+                Some(f) => {
                     fence = None;
-                    if let Some((lang, run, at, src)) = code.take() {
-                        let lit = code::highlight(&src, &lang, &p.theme);
-                        s.lang.get_or_insert(lang);
-                        let b = blocks.last_mut().unwrap();
-                        b.lines.extend(lit.into_iter().enumerate().map(|(k, l)| (false, l, at + k)));
-                        b.code = true;
-                        b.run = run.map(|[prog, flag]| vec![prog.to_string(), flag.to_string(), src.join("\n")]);
+                    if let Some(o) = code.take() {
+                        close(p, s, blocks.last_mut().unwrap(), o, f);
                     }
                 }
             }
             continue;
         }
-        if let Some((.., src)) = code.as_mut() {
-            src.push(l.to_string());
+        if let Some(o) = code.as_mut() {
+            o.src.push(l.to_string());
             continue;
         }
         if fence.is_none() {
@@ -554,6 +784,9 @@ fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
             None => blocks.push(Block { lines: vec![(step, line, i)], ..Block::default() }),
         }
     }
+    if !rows.is_empty() {
+        blocks.push(table(p, &rows));
+    }
     if let Some(f) = fence {
         p.n = f;
         p.err(0, 3, "a ``` with no ``` to close it");
@@ -569,13 +802,19 @@ fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
     for b in blocks {
         let at = s.body.len();
         let w = b.lines.iter().map(|(_, l, _)| markup::width(l)).max().unwrap_or(0);
-        for (is_step, mut line, src) in b.lines {
+        for (k, (is_step, mut line, src)) in b.lines.into_iter().enumerate() {
             let pad = w - markup::width(&line);
             line.extend(std::iter::repeat_n(markup::Cell { ch: ' ', st: Style::default() }, pad as usize));
             if is_step {
                 step += 1;
             }
-            s.body.push(Body { line, src, step: if is_step { step } else { 0 }, code: b.code });
+            let bar = b.bars.get(k).cloned().flatten();
+            s.body.push(Body { line, src, step: if is_step { step } else { 0 }, code: b.code, bar });
+        }
+        // Each focus group a step of its own, after the block.
+        for g in b.focus {
+            step += 1;
+            s.focus.push(Focus { step, block: at..s.body.len(), lines: g.into_iter().map(|k| at + k).collect() });
         }
         // Its output comes in on a step of its own, after the block.
         if let Some(argv) = b.run {
@@ -592,6 +831,104 @@ fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
             p.err(0, 3, "a picture slide has no steps");
         }
     }
+}
+
+/// A ``` opening: its language, then any of `run`, a file to take the
+/// lines from (`path`, `path:10-24`, `path#name`), and `focus: 2|4-5`.
+fn open(p: &mut P, l: &str, info: &str, i: usize, ran: bool) -> Option<Open> {
+    let mut words = info.split_whitespace().peekable();
+    let lang = words.next()?.to_string();
+    let chart = lang == "chart";
+    if !chart && !code::known(&lang) {
+        let at = l.find(&lang).unwrap_or(0);
+        p.err(at, at + lang.len(), format!("no language \"{lang}\"; try ts, tsx, js, rs, py, go, sh, json, yaml, sql, diff, or chart"));
+    }
+    let mut o = Open { lang, run: None, file: None, focus: vec![], at: i + 1, src: vec![] };
+    while let Some(w) = words.next() {
+        let at = l.find(w).unwrap_or(0);
+        let span = at + w.chars().count();
+        if w == "run" {
+            if ran {
+                p.err(at, span, "a second block that runs; a slide has one");
+            } else {
+                o.run = runner(&o.lang);
+                if o.run.is_none() {
+                    p.err(at, span, format!("deque can't run {}: sh, bash, zsh, fish, py, js and rb run", o.lang));
+                }
+            }
+        } else if let Some(spec) = w.strip_prefix("focus:") {
+            let spec = if spec.is_empty() { words.next().unwrap_or("") } else { spec };
+            match groups(spec) {
+                Some(g) => o.focus = g,
+                None => p.err(at, l.chars().count(), "focus: lines to light, a step each, like focus: 2|4-5,8"),
+            }
+        } else {
+            // A file: path, path:10-24, or path#name.
+            let cut = w.find(['#', ':']).unwrap_or(w.len());
+            let full = p.dir.join(&w[..cut]);
+            p.files.push(full.clone());
+            match std::fs::read_to_string(&full) {
+                Ok(text) => match excerpt(&text, (cut < w.len()).then(|| &w[cut..])) {
+                    Ok(got) => o.file = Some(got),
+                    Err(e) => p.err(at, span, format!("{}: {e}", &w[..cut])),
+                },
+                Err(_) => p.err(at, span, format!("no file {}; after the language go run, focus: or a file", full.display())),
+            }
+        }
+    }
+    Some(o)
+}
+
+/// A ``` block closing: a chart's bars, or code, highlighted, from its own
+/// lines or a file's, with its focus steps.
+fn close(p: &mut P, s: &mut Slide, b: &mut Block, o: Open, opened: usize) {
+    if o.file.is_some() && o.src.iter().any(|l| !l.trim().is_empty()) {
+        p.n = opened;
+        p.err(0, 3, "a block from a file has no lines of its own");
+    }
+    if o.lang == "chart" {
+        let got: Vec<(usize, (String, String, f64))> = o
+            .src
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.trim().is_empty())
+            .filter_map(|(k, l)| match chart_line(l) {
+                Some(c) => Some((o.at + k, c)),
+                None => {
+                    p.n = o.at + k;
+                    p.err(0, l.chars().count(), "a chart line is a label, then a number: builds 42");
+                    None
+                }
+            })
+            .collect();
+        let most = got.iter().map(|(_, c)| c.2).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
+        let lw = got.iter().map(|(_, c)| c.0.chars().count()).max().unwrap_or(0);
+        for (n, (label, shown, v)) in got {
+            let lead = markup::plain(&format!("{label:<lw$}  "), Style::default());
+            let tail = markup::plain(&format!(" {shown}"), Style::fg(p.theme.muted));
+            let bar = Bar { lead, frac: (v / most).max(0.0), width: 32, tail };
+            b.lines.push((false, bar.line(1.0, Style::fg(p.theme.accent)), n));
+            b.bars.push(Some(bar));
+        }
+        return;
+    }
+    let from_file = o.file.is_some();
+    let src = o.file.unwrap_or(o.src);
+    let lit = code::highlight(&src, &o.lang, &p.theme);
+    let n = lit.len();
+    b.lines.extend(lit.into_iter().enumerate().map(|(k, l)| (false, l, if from_file { opened } else { o.at + k })));
+    b.bars.extend(std::iter::repeat_n(None, n));
+    b.code = true;
+    b.run = o.run.map(|[prog, flag]| vec![prog.to_string(), flag.to_string(), src.join("\n")]);
+    for g in o.focus.iter().filter(|_| n > 0) {
+        if let Some(&bad) = g.iter().find(|&&k| k == 0 || k > n) {
+            p.n = opened;
+            p.err(0, 3, format!("focus: line {bad}, but the block has {n}"));
+            return;
+        }
+    }
+    b.focus = o.focus.into_iter().map(|g| g.into_iter().map(|k| k - 1).collect()).collect();
+    s.lang.get_or_insert(o.lang);
 }
 
 fn drawing(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize, w: i32, h: i32) {
@@ -700,4 +1037,64 @@ fn drawing(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize, w:
         p.err(0, 3, "a drawn slide has no headline; draw it with text and boxes");
     }
     s.draw = Some(Draw { w, h, groups });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn times() {
+        assert_eq!(seconds("90"), Some(90));
+        assert_eq!(seconds("90s"), Some(90));
+        assert_eq!(seconds("2m"), Some(120));
+        assert_eq!(seconds("1m30s"), Some(90));
+        assert_eq!(seconds("soon"), None);
+        assert_eq!(seconds("0"), None);
+    }
+
+    #[test]
+    fn focus_groups() {
+        assert_eq!(groups("2|4-5,8"), Some(vec![vec![2], vec![4, 5, 8]]));
+        assert_eq!(groups("x"), None);
+    }
+
+    const SRC: &str = "import x;\n\nexport function fee(o) {\n  if (o) {\n    return 0;\n  }\n\n  return 1;\n}\n\nfunction fees() {}\n";
+
+    #[test]
+    fn excerpts() {
+        // A function by name, its body and closing brace, dedented.
+        let got = excerpt(SRC, Some("#fee")).unwrap();
+        assert_eq!(got.first().unwrap(), "export function fee(o) {");
+        assert_eq!(got.last().unwrap(), "}");
+        assert_eq!(got.len(), 7);
+        // A whole word: #fees isn't in #fee.
+        assert_eq!(excerpt(SRC, Some("#fees")).unwrap(), ["function fees() {}"]);
+        // Lines, dedented.
+        assert_eq!(excerpt(SRC, Some(":4-5")).unwrap(), ["if (o) {", "  return 0;"]);
+        assert!(excerpt(SRC, Some(":40-50")).is_err());
+        assert!(excerpt(SRC, Some("#nope")).is_err());
+    }
+
+    #[test]
+    fn charts_and_tables() {
+        assert_eq!(chart_line("by hand  0.5"), Some(("by hand".into(), "0.5".into(), 0.5)));
+        assert_eq!(chart_line("cost $3,500"), Some(("cost".into(), "$3,500".into(), 3500.0)));
+        assert_eq!(chart_line("nothing"), None);
+        let (t, d) = parse("---\n| a | n |\n|---|---|\n| x | 7 |\n| yy | 10 |\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        let rows: Vec<String> = t.slides[0].body.iter().map(|b| markup::text(&b.line)).collect();
+        // Header, a rule, and the numbers to the right.
+        assert_eq!(rows, ["a    n ", "───────", "x     7", "yy   10"]);
+    }
+
+    #[test]
+    fn focus_steps_follow_the_block() {
+        let (t, d) = parse("---\n```ts focus: 1|2\na\nb\n```\n> after\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        let s = &t.slides[0];
+        assert_eq!(s.focus.iter().map(|f| (f.step, f.lines.clone())).collect::<Vec<_>>(), [(1, vec![0]), (2, vec![1])]);
+        assert_eq!(s.body[2].step, 3);
+        assert_eq!(s.steps(), 3);
+    }
 }

@@ -136,10 +136,10 @@ impl Screen {
         if let Ok((w, h)) = crossterm::terminal::size() {
             let was = (self.w, self.h);
             (self.w, self.h) = (w as i32, h as i32);
-            if was != (self.w, self.h) {
-                if let Some(s) = self.sky.take() {
-                    self.backdrop(s.kind, s.glow);
-                }
+            if was != (self.w, self.h)
+                && let Some(s) = self.sky.take()
+            {
+                self.backdrop(s.kind, s.glow);
             }
         }
     }
@@ -181,6 +181,15 @@ impl Screen {
         let sky = self.sky.as_mut().unwrap();
         sky.pointer = Some(at);
         sky.trail.push(at);
+    }
+
+    /// Where the phone remote pointed, and tapped, as the mouse would.
+    pub fn steer(&mut self) {
+        let Some(h) = self.tap.clone() else { return };
+        for (x, y, tap) in h.points() {
+            let (row, col) = ((y * (self.h - 1) as f64).round() as i32 + 1, (x * (self.w - 1) as f64).round() as i32 + 1);
+            if tap { self.click(row, col) } else { self.point(row, col) }
+        }
     }
 
     /// What the mouse did, for the pointer: moving it, or a click.
@@ -532,10 +541,11 @@ impl Screen {
                 return;
             }
             let mut wait = if self.watch.is_some() { (end - now).min(Duration::from_millis(20)) } else { end - now };
-            if self.sky.is_some() {
+            if self.sky.is_some() || self.tap.is_some() {
                 wait = wait.min(Duration::from_millis(15));
             }
             if !event::poll(wait).unwrap_or(false) {
+                self.steer();
                 self.sky_frame();
                 self.flush();
                 continue;

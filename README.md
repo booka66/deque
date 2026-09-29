@@ -69,6 +69,10 @@ caption
 | `> text` | step |
 | ```` ``` ```` | column-aligned block; ```` ```lang ```` highlights code |
 | ```` ```sh run ```` | code that runs on a step, its output under it |
+| ```` ```ts src/a.ts#fee ```` | code from a file: `path`, `path:10-24`, or `path#name` (that function) |
+| ```` ```ts focus: 2\|4-5 ```` | on each step, those lines lit, the rest dim |
+| ```` ```chart ```` | lines of `label value`: bars that grow in |
+| `\| a \| b \|` | a table; a `\|---\|` row under the first makes it a header |
 | `![label](file)` | picture; side by side on one line |
 | `// text` | speaker note |
 
@@ -86,6 +90,7 @@ Inline: `**bold**` `` `code` `` `{accent}…{/}` `${ENV}`
 | `enter:` | command to run on enter |
 | `cols:` | columns while `enter:` runs, with `--tv` |
 | `draw:` | `WxH` canvas: `text` `center` `box` `arrow` `dotted` `clear` `step` |
+| `time:` | how long it's meant to be up (`90s`, `2m`); `deque notes` shows if you're ahead or behind |
 
 Code in the same language on slides in a row morphs: what's in both swings to its new place, the rest fades. A slide's own `tr:` turns that off. `tr: morph` does it to the whole slide: every word, and the headline's blocks flocking into the new headline.
 
@@ -97,17 +102,23 @@ A `sky:` moves the whole time the slide is up, drawn a quarter of a cell at a ti
 
 Headlines move a quarter of a cell at a time. In kitty and Ghostty, moving text goes as pictures in the terminal's own font, placed to the pixel; elsewhere it smears between cells. `DEQUE_FACE=path` picks the font, `DEQUE_SMOOTH=off` smears everywhere.
 
+Code from a file is read again when the file changes, and `deque check` says when the lines or the name aren't there.
+
+`--calm` (or `calm: on`) keeps still what needn't move: no skies, glow, flourishes, transitions or morphs; things fade in.
+
 Options before the first `---` are defaults. Colors: `accent` `muted` `good` `bad` `warm` `link` `fg` `bg` (`#rrggbb`).
 
 ## Watching along
 
 With `--share`, anyone on the same network can follow the talk live in a browser, animations and pointer included. Press `w` to show them how: a QR code and the link, over the slide. A slide can say `${DEQUE_URL}`.
 
-The link carries a random token; without it there's nothing to see. Watchers get only what drawing needs (text, cursor moves, colors), never anything that would change their terminal, and can't send anything back. It's plain HTTP, so anyone on the network can read what's shown.
+The link is HTTPS, with a certificate deque makes for the run: browsers warn once (it's signed by nobody), then the stream is encrypted. It carries a random token; without it there's nothing to see. Watchers get only what drawing needs (text, cursor moves, colors), never anything that would change their terminal, and can't send anything back.
 
 The page draws in your terminal's font: the file its config names (Ghostty, kitty) or `DEQUE_FACE`, sent to watchers' browsers. `--share-no-font` keeps it on your machine; check your font's license allows serving it.
 
-`--share-curl` also offers `curl -sN …` to watch in a terminal (`${DEQUE_WATCH}`). Over plain HTTP, whoever's on the network between could write to that terminal, so use it on networks you trust. Pictures don't reach watchers.
+With `--share`, `P` (capital) shows a QR code for your phone: a remote with next and back, your notes, a timer, and a pad to point with; the laser follows your finger on the TV. Or tap **aim** and point the phone at the screen like a remote: aim at the middle and tap **center**, then at the top-right corner and tap **corner**, and the laser goes where you point, whatever the screen's size or distance (tap the pad for a ring; tap **center** again when it drifts). The remote only works over HTTPS. It has its own link, apart from the watching one, and `deque notes` shows it too. Show it before the room's watching: anyone who scans it can drive the talk.
+
+`--share-curl` also offers `curl -skN …` to watch in a terminal (`${DEQUE_WATCH}`). `-k` takes the unsigned certificate, so whoever's on the network between could still write to that terminal: use it on networks you trust. Pictures don't reach watchers.
 
 ## Images
 

@@ -40,6 +40,17 @@ impl Link {
 
     pub fn gone(&self) {
         let _ = std::fs::remove_file(&self.state);
+        let _ = std::fs::remove_file(self.state.with_extension("remote"));
+    }
+
+    /// The presenter: the phone remote's link, for the notes window.
+    pub fn publish_remote(&self, url: &str) {
+        write(&self.state.with_extension("remote"), url);
+    }
+
+    /// The notes window: the remote's link, while the talk's shared.
+    pub fn remote(&self) -> Option<String> {
+        std::fs::read_to_string(self.state.with_extension("remote")).ok()
     }
 
     /// The notes window: where the presenter is, if it's running.

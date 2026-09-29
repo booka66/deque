@@ -460,7 +460,7 @@ impl Sky {
         }
         self.cells = next;
         self.gens += 1;
-        if self.gens % 40 == 0 || alive < w * h / 60 {
+        if self.gens.is_multiple_of(40) || alive < w * h / 60 {
             let (cx, cy) = (self.rng.below(w as i32) as usize, self.rng.below(h as i32) as usize);
             for _ in 0..60 {
                 let (x, y) = ((cx + self.rng.below(12) as usize) % w, (cy + self.rng.below(8) as usize) % h);

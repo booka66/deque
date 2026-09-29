@@ -23,6 +23,9 @@ pub fn run(path: &Path, load: impl Fn(&Path) -> Result<Talk, String>) -> Result<
     let mut since = Instant::now();
     let mut jump = String::new();
     let mut last = String::new();
+    // The slide on, and when it was come to, for pacing.
+    let mut on: Option<usize> = None;
+    let mut entered = Instant::now();
     loop {
         let now = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         if now != stamp {
@@ -36,10 +39,14 @@ pub fn run(path: &Path, load: impl Fn(&Path) -> Result<Talk, String>) -> Result<
         // included.
         s.size();
         let at = link.where_();
+        if at.map(|a| a.0) != on {
+            on = at.map(|a| a.0);
+            entered = Instant::now();
+        }
         let frame = format!("{at:?} {} {jump} {:?} {} {}", since.elapsed().as_secs(), stamp, s.w, s.h);
         if frame != last {
             last = frame;
-            draw(&mut s, &talk, at, since, &jump);
+            draw(&mut s, &talk, at, since, entered.max(since), &jump, link.remote().as_deref());
         }
         if !event::poll(Duration::from_millis(50)).unwrap_or(false) {
             continue;
@@ -107,7 +114,34 @@ fn what(slide: &Slide, step: Option<usize>) -> String {
     }
 }
 
-fn draw(s: &mut Screen, talk: &Talk, at: Option<(usize, usize)>, since: Instant, jump: &str) {
+/// m:ss.
+fn mmss(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// The pace, when slides say how long they're meant to be up: this one's
+/// time against its own, and whether the talk came to it ahead of the
+/// times of those before it added up, or behind.
+fn pace(talk: &Talk, n: usize, since: Instant, entered: Instant) -> Option<(String, bool, String, bool)> {
+    if talk.slides.iter().all(|s| s.time.is_none()) {
+        return None;
+    }
+    let here = entered.elapsed().as_secs();
+    let slide = match talk.slides[n].time {
+        Some(t) => (format!("this slide {} / {}", mmss(here), mmss(t as u64)), here > t as u64),
+        None => (format!("this slide {}", mmss(here)), false),
+    };
+    let planned: u64 = talk.slides[..n].iter().filter_map(|s| s.time).map(u64::from).sum();
+    let came = entered.duration_since(since).as_secs();
+    let overall = match planned as i64 - came as i64 {
+        d if d.abs() < 10 => ("on pace".to_string(), false),
+        d if d > 0 => (format!("{} ahead", mmss(d as u64)), false),
+        d => (format!("{} behind", mmss(-d as u64)), true),
+    };
+    Some((slide.0, slide.1, overall.0, overall.1))
+}
+
+fn draw(s: &mut Screen, talk: &Talk, at: Option<(usize, usize)>, since: Instant, entered: Instant, jump: &str, remote: Option<&str>) {
     // One synchronized frame where the terminal supports it, so no flicker.
     s.raw("\x1b[?2026h");
     s.clear();
@@ -134,6 +168,10 @@ fn draw(s: &mut Screen, talk: &Talk, at: Option<(usize, usize)>, since: Instant,
     s.put_str(1, s.w - right.width() as i32 - 1 + timer.len() as i32, &right[timer.len()..], mut_);
     if at.is_none() {
         s.put_str(2, 2, "the talk isn't running: start it with deque, and this follows it", Style::fg(s.theme.bad));
+    } else if let Some((here, over, overall, behind)) = pace(talk, n, since, entered) {
+        let (good, bad) = (Style::fg(s.theme.good), Style::fg(s.theme.bad));
+        s.put_str(2, 2, &here, if over { bad } else { mut_ });
+        s.put_str(2, s.w - overall.width() as i32 - 1, &overall, if behind { bad } else { good });
     }
 
     s.put_str(3, 2, "now", mut_);
@@ -170,6 +208,11 @@ fn draw(s: &mut Screen, talk: &Talk, at: Option<(usize, usize)>, since: Instant,
             s.put_str(s.h - 3, 2, &t, Style { bold: true, ..Style::default() });
         }
         None => s.put_str(s.h - 4, 2, "the end", mut_),
+    }
+    // The phone remote, while the talk's shared: here, off the big screen.
+    if let Some(r) = remote {
+        s.put_str(s.h - 2, 2, "phone remote  ", mut_);
+        s.put_str(s.h - 2, 16, r, acc);
     }
     let keys = if jump.is_empty() { "→ next · ← back · 12⏎ slide 12 · r replay · t timer to 0 · q quit".to_string() } else { format!("go to {jump}_") };
     s.put_str(s.h - 1, 2, &keys, if jump.is_empty() { mut_ } else { acc });

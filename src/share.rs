@@ -21,7 +21,7 @@
 use crate::markup::{Rgb, Theme};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -57,6 +57,15 @@ struct Inner {
     /// The size watchers were last told, to tell them again when it changes.
     said: Mutex<(i32, i32)>,
     token: String,
+    /// The remote's own token: control, which watching doesn't give.
+    remote: String,
+    /// What the remote asked for, for the talk to do: next, back, …
+    cmds: Mutex<Vec<String>>,
+    /// Where the remote's finger is, as fractions of the screen, and
+    /// whether it tapped.
+    points: Mutex<Vec<(f64, f64, bool)>>,
+    /// Where the talk is, as JSON, for the remote to show.
+    state: Mutex<String>,
     /// The terminal's font, for the page to draw in, and its type.
     font: Option<(Vec<u8>, &'static str)>,
 }
@@ -96,6 +105,22 @@ impl Hub {
         *self.0.theme.lock().unwrap() = t.clone();
     }
 
+    /// A command from the remote, if one's waiting.
+    pub fn take(&self) -> Option<String> {
+        let mut c = self.0.cmds.lock().unwrap();
+        (!c.is_empty()).then(|| c.remove(0))
+    }
+
+    /// Where the remote pointed, and tapped, since last asked.
+    pub fn points(&self) -> Vec<(f64, f64, bool)> {
+        std::mem::take(&mut *self.0.points.lock().unwrap())
+    }
+
+    /// Where the talk is, for the remote.
+    pub fn state(&self, json: String) {
+        *self.0.state.lock().unwrap() = json;
+    }
+
     /// The end, said to everyone still watching.
     pub fn end(&self) {
         self.send(b"\x1b[0m\x1b[2J\x1b[H\x1b[?25hthe talk's over. thanks for watching.\r\n", 0, 0);
@@ -105,6 +130,8 @@ impl Hub {
 pub struct Share {
     pub hub: Hub,
     pub url: String,
+    /// The remote, for the presenter's phone alone.
+    pub remote: String,
     /// The command to watch it in a terminal, when that's offered: over
     /// plain HTTP, whoever's on the network between can write to a
     /// terminal that pipes the stream in, so it's for networks you trust.
@@ -157,13 +184,34 @@ fn load(path: &std::path::Path) -> Option<(Vec<u8>, &'static str)> {
     Some((std::fs::read(path).ok()?, kind))
 }
 
+/// A certificate of its own for this run, for this address and localhost,
+/// signed by nobody: browsers warn once, then the connection's encrypted.
+fn tls(ip: &str) -> Result<Arc<rustls::ServerConfig>, String> {
+    let fail = |e: &dyn std::fmt::Display| format!("deque: --share couldn't make a certificate: {e}\n");
+    let mut params = rcgen::CertificateParams::new(vec![ip.to_string(), "localhost".into()]).map_err(|e| fail(&e))?;
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params.distinguished_name.push(rcgen::DnType::CommonName, "deque, this talk only");
+    let signing = rcgen::KeyPair::generate().map_err(|e| fail(&e))?;
+    let cert = params.self_signed(&signing).map_err(|e| fail(&e))?;
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(signing.serialize_der().into());
+    let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| fail(&e))?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.der().clone()], key)
+        .map_err(|e| fail(&e))?;
+    Ok(Arc::new(cfg))
+}
+
 /// Listening on the first free port from 7700; `curl`, to offer the
 /// command to watch in a terminal; `face`, the font to send the page.
 pub fn start(theme: &Theme, curl: bool, face: Option<std::path::PathBuf>) -> Result<Share, String> {
     let (l, port) = (7700..7720)
         .find_map(|p| TcpListener::bind(("0.0.0.0", p)).ok().map(|l| (l, p)))
         .ok_or("deque: --share found no free port from 7700 to 7719\n")?;
-    let token = token();
+    let (token, remote) = (token(), token());
+    let ip = here();
+    let tls = tls(&ip)?;
     let hub = Hub(Arc::new(Inner {
         viewers: Mutex::new(vec![]),
         joined: AtomicBool::new(false),
@@ -173,6 +221,10 @@ pub fn start(theme: &Theme, curl: bool, face: Option<std::path::PathBuf>) -> Res
         theme: Mutex::new(theme.clone()),
         said: Mutex::new((0, 0)),
         token: token.clone(),
+        remote: remote.clone(),
+        cmds: Mutex::new(vec![]),
+        points: Mutex::new(vec![]),
+        state: Mutex::new("{}".into()),
         font: face.as_deref().and_then(load),
     }));
     let h = hub.clone();
@@ -183,37 +235,78 @@ pub fn start(theme: &Theme, curl: bool, face: Option<std::path::PathBuf>) -> Res
                 h.0.open.fetch_sub(1, Ordering::SeqCst);
                 continue;
             }
-            let h = h.clone();
+            let (h, tls) = (h.clone(), tls.clone());
             std::thread::spawn(move || {
-                serve(c, &h);
+                let _ = c.set_read_timeout(Some(PATIENCE));
+                let _ = c.set_write_timeout(Some(PATIENCE));
+                // A TLS handshake starts with 0x16; anything else is plain.
+                let mut b = [0u8; 1];
+                match c.peek(&mut b) {
+                    Ok(1) if b[0] == 0x16 => {
+                        if let Ok(conn) = rustls::ServerConnection::new(tls) {
+                            serve(rustls::StreamOwned::new(conn, c), &h, true);
+                        }
+                    }
+                    Ok(1) => serve(c, &h, false),
+                    _ => {}
+                }
                 h.0.open.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
-    let host = format!("{}:{port}", here());
-    Ok(Share { hub, url: format!("http://{host}/{token}"), curl: curl.then(|| format!("curl -sN {host}/{token}")) })
+    let host = format!("{ip}:{port}");
+    Ok(Share {
+        hub,
+        url: format!("https://{host}/{token}"),
+        remote: format!("https://{host}/{remote}"),
+        curl: curl.then(|| format!("curl -skN https://{host}/{token}")),
+    })
 }
 
 /// One request. `/TOKEN` from a terminal (curl, wget), or `/TOKEN/tty`,
 /// gets the talk as it's drawn; `/TOKEN` from a browser, the page, and
 /// `/TOKEN/app.js` its script; anything else, 404.
-fn serve(mut c: TcpStream, hub: &Hub) {
-    let _ = c.set_read_timeout(Some(PATIENCE));
-    let _ = c.set_write_timeout(Some(PATIENCE));
+/// A request's head, read from c: up to its blank line, and no more than
+/// 8 KiB of it. None when the other end's gone quiet or sent too much.
+fn request(c: &mut impl Read) -> Option<String> {
     let mut head = vec![];
-    let mut b = [0u8; 1024];
-    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+    let mut b = [0u8; 1];
+    // A byte at a time, so nothing of a next request is read with this one.
+    while !head.ends_with(b"\r\n\r\n") {
         match c.read(&mut b) {
-            Ok(n) if n > 0 && head.len() + n <= 8192 => head.extend_from_slice(&b[..n]),
-            _ => return,
+            Ok(1) if head.len() < 8192 => head.push(b[0]),
+            _ => return None,
         }
     }
-    let head = String::from_utf8_lossy(&head).to_lowercase();
-    let mut first = head.split_whitespace();
-    let (method, path) = (first.next().unwrap_or(""), first.next().unwrap_or("/"));
-    let path = path.split('?').next().unwrap_or("");
-    let mut parts = path.trim_start_matches('/').splitn(2, '/');
-    let (key, rest) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    Some(String::from_utf8_lossy(&head).to_lowercase())
+}
+
+/// One connection, TLS or not: requests to watch get their answer, and the
+/// connection's closed; the remote's are answered on the same connection
+/// till it goes quiet, and only over TLS.
+fn serve(mut c: impl Read + Write, hub: &Hub, secure: bool) {
+    loop {
+        let Some(head) = request(&mut c) else { return };
+        let mut first = head.split_whitespace();
+        let (method, path) = (first.next().unwrap_or(""), first.next().unwrap_or("/"));
+        let path = path.split('?').next().unwrap_or("");
+        let mut parts = path.trim_start_matches('/').splitn(2, '/');
+        let (key, rest) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        if same(key, &hub.0.remote) {
+            // Control, over plain HTTP, would put the remote's token on the
+            // network for anyone to read.
+            if !secure || !control(&mut c, hub, method, rest) {
+                let _ = c.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                return;
+            }
+            continue;
+        }
+        return watch(c, hub, &head, method, key, rest);
+    }
+}
+
+/// A request to watch: the page, its script, its font, or the stream.
+fn watch(mut c: impl Read + Write, hub: &Hub, head: &str, method: &str, key: &str, rest: &str) {
     if method != "get" || !same(key, &hub.0.token.to_lowercase()) {
         let _ = c.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
@@ -222,8 +315,12 @@ fn serve(mut c: TcpStream, hub: &Hub) {
     match rest {
         "tty" => stream(c, hub),
         "" if terminal => stream(c, hub),
-        "" => reply(&mut c, "text/html", &page(hub)),
-        "app.js" => reply(&mut c, "text/javascript", &app(hub)),
+        "" => {
+            reply(&mut c, "text/html", &page(hub), false);
+        }
+        "app.js" => {
+            reply(&mut c, "text/javascript", &app(hub), false);
+        }
         "font" if hub.0.font.is_some() => {
             let (bytes, kind) = hub.0.font.as_ref().unwrap();
             let head = format!(
@@ -238,19 +335,247 @@ fn serve(mut c: TcpStream, hub: &Hub) {
     }
 }
 
+/// The remote: its page and script, where the talk is, and what it asks
+/// for: a step (POST do/next, back, first, last, replay), or the pointer
+/// (POST point/X/Y or tap/X/Y, fractions of the screen).
+fn control(c: &mut impl Write, hub: &Hub, method: &str, rest: &str) -> bool {
+    let ok = |c: &mut dyn Write| c.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").is_ok();
+    let parts: Vec<&str> = rest.split('/').collect();
+    match (method, parts.as_slice()) {
+        ("get", [""]) => reply(c, "text/html", &remote_page(&hub.0.remote), true),
+        ("get", ["remote.js"]) => reply(c, "text/javascript", REMOTE_JS, true),
+        ("get", ["state"]) => {
+            let s = hub.0.state.lock().unwrap().clone();
+            reply(c, "application/json", &s, true)
+        }
+        ("post", ["do", what]) if ["next", "back", "first", "last", "replay"].contains(what) => {
+            let mut q = hub.0.cmds.lock().unwrap();
+            if q.len() < 16 {
+                q.push(what.to_string());
+            }
+            drop(q);
+            ok(c)
+        }
+        ("post", [kind @ ("point" | "tap"), x, y]) => match (x.parse::<f64>(), y.parse::<f64>()) {
+            (Ok(x), Ok(y)) if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) => {
+                let mut q = hub.0.points.lock().unwrap();
+                if q.len() >= 64 {
+                    q.remove(0);
+                }
+                q.push((x, y, *kind == "tap"));
+                drop(q);
+                ok(c)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The remote: where the talk is, the notes, next and back, and a pad
+/// the screen's shape to point with.
+fn remote_page(token: &str) -> String {
+    r#"<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>deque · remote</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#1d2021;color:#ebdbb2;font:16px ui-monospace,Menlo,monospace}
+body{display:flex;flex-direction:column;padding:12px;gap:10px;user-select:none;-webkit-user-select:none}
+#top{display:flex;justify-content:space-between;color:#928374}
+#title{font-weight:bold;color:#fabd2f;font-size:20px}
+#notes{flex:1;overflow:auto;white-space:pre-wrap;line-height:1.4;min-height:60px}
+#next{color:#928374}
+#pad{position:relative;width:100%;border:1px solid #504945;border-radius:10px;touch-action:none;background:#282828}
+#dot{position:absolute;width:12px;height:12px;border-radius:6px;background:#fb4934;transform:translate(-6px,-6px);display:none;box-shadow:0 0 12px #fb4934}
+#keys,#aimrow{display:flex;gap:10px}
+button{flex:1;font:inherit;font-size:22px;padding:22px 0;border:0;border-radius:12px;background:#3c3836;color:#ebdbb2}
+#go{flex:2;background:#fabd2f;color:#1d2021;font-weight:bold}
+.small{font-size:16px;padding:12px 0}
+#aim.on{background:#fb4934;color:#1d2021}
+#hint{color:#928374;font-size:13px;min-height:1em}
+</style>
+<div id="top"><span id="where">…</span><span id="clock"></span></div>
+<div id="title"></div>
+<div id="notes"></div>
+<div id="next"></div>
+<div id="pad"><div id="dot"></div></div>
+<div id="aimrow"><button id="aim" class="small">aim</button><button id="center" class="small" hidden>center</button><button id="corner" class="small" hidden>corner</button></div>
+<div id="hint"></div>
+<div id="keys"><button id="back">back</button><button id="go">next</button></div>
+<script src="/TOKEN/remote.js"></script>
+"#
+    .replace("TOKEN", token)
+}
+
+/// The remote's script. Its own address holds the token, so everything it
+/// asks for is relative to that.
+const REMOTE_JS: &str = r#"const base = location.pathname.replace(/\/$/, "") + "/";
+const $ = id => document.getElementById(id);
+const post = p => fetch(base + p, {method: "POST"}).catch(() => {});
+$("go").onclick = () => post("do/next");
+$("back").onclick = () => post("do/back");
+let started = Date.now(), aspect = 16 / 9;
+async function poll() {
+  try {
+    const s = await (await fetch(base + "state", {cache: "no-store"})).json();
+    $("where").textContent = s.n ? `${s.n} / ${s.total}` + (s.steps ? ` · step ${s.shown}/${s.steps}` : "") : "…";
+    $("title").textContent = s.title || "";
+    $("notes").textContent = (s.notes || []).join("\n");
+    $("next").textContent = s.next ? "next · " + s.next : "the end";
+    if (s.w && s.h) aspect = s.w / (s.h * 2);
+    size();
+  } catch (e) {}
+  setTimeout(poll, 600);
+}
+function size() {
+  const pad = $("pad");
+  pad.style.height = Math.min(pad.clientWidth / aspect, innerHeight * 0.4) + "px";
+}
+setInterval(() => {
+  const e = Math.floor((Date.now() - started) / 1000);
+  $("clock").textContent = Math.floor(e / 60) + ":" + String(e % 60).padStart(2, "0");
+}, 1000);
+// The pad: a finger on it is the pointer on the screen; a tap, a ring.
+let last = 0, moved = false;
+function at(t) {
+  const r = $("pad").getBoundingClientRect();
+  const x = Math.min(1, Math.max(0, (t.clientX - r.left) / r.width));
+  const y = Math.min(1, Math.max(0, (t.clientY - r.top) / r.height));
+  $("dot").style.display = "block";
+  $("dot").style.left = x * r.width + "px";
+  $("dot").style.top = y * r.height + "px";
+  return [x.toFixed(4), y.toFixed(4)];
+}
+$("pad").addEventListener("touchstart", e => { moved = false; at(e.touches[0]); e.preventDefault(); }, {passive: false});
+$("pad").addEventListener("touchmove", e => {
+  moved = true;
+  const [x, y] = at(e.touches[0]);
+  const now = Date.now();
+  if (now - last > 30) { last = now; post(`point/${x}/${y}`); }
+  e.preventDefault();
+}, {passive: false});
+$("pad").addEventListener("touchend", e => {
+  // Aiming, a tap is a ring where the phone points.
+  if (aiming && !moved) { ring(); e.preventDefault(); return; }
+  const [x, y] = at(e.changedTouches[0]);
+  post(`${moved ? "point" : "tap"}/${x}/${y}`);
+  e.preventDefault();
+}, {passive: false});
+
+// Aiming: the phone held like a remote, top toward the screen. Which way
+// it points, from its motion sensors, against where it pointed when
+// centered, and how far it turned and tilted to the top-right corner: the
+// screen as big as it looks from here, whichever way this phone counts.
+// Till a corner's been shown it, 20 degrees to the side, 12 up.
+let aiming = false, zero = null, look = null, aimed = [0.5, 0.5], sending = false, lastAim = 0;
+let corner = [-20, 12];
+try {
+  const kept = JSON.parse(localStorage.getItem("deque-corner"));
+  if (Array.isArray(kept) && kept.length === 2) corner = kept;
+} catch (e) {}
+const turned = () => [((look[0] - zero[0] + 540) % 360) - 180, look[1] - zero[1]];
+function dot(x, y) {
+  const r = $("pad").getBoundingClientRect();
+  $("dot").style.display = "block";
+  $("dot").style.left = x * r.width + "px";
+  $("dot").style.top = y * r.height + "px";
+}
+function ring() { post(`tap/${aimed[0].toFixed(4)}/${aimed[1].toFixed(4)}`); }
+function aim(e) {
+  if (e.alpha == null || e.beta == null) return;
+  look = [e.alpha, e.beta];
+  if (!zero) zero = look;
+  const [turn, tilt] = turned();
+  const x = Math.min(1, Math.max(0, 0.5 + 0.5 * turn / corner[0]));
+  const y = Math.min(1, Math.max(0, 0.5 - 0.5 * tilt / corner[1]));
+  aimed = [x, y];
+  dot(x, y);
+  // As often as the last one's answered, at most 30 a second.
+  const now = Date.now();
+  if (!sending && now - lastAim > 33) {
+    lastAim = now;
+    sending = true;
+    post(`point/${x.toFixed(4)}/${y.toFixed(4)}`).finally(() => (sending = false));
+  }
+}
+$("aim").onclick = async () => {
+  if (aiming) {
+    removeEventListener("deviceorientation", aim);
+    aiming = false;
+    $("aim").classList.remove("on");
+    $("aim").textContent = "aim";
+    $("center").hidden = true;
+    $("corner").hidden = true;
+    $("hint").textContent = "";
+    return;
+  }
+  if (!window.isSecureContext) {
+    $("hint").textContent = "aiming needs the https link";
+    return;
+  }
+  // iPhones ask first, and only on a tap.
+  if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) {
+    try {
+      if ((await DeviceOrientationEvent.requestPermission()) !== "granted") {
+        $("hint").textContent = "motion wasn't allowed";
+        return;
+      }
+    } catch (e) {
+      $("hint").textContent = "motion wasn't allowed";
+      return;
+    }
+  }
+  zero = null;
+  addEventListener("deviceorientation", aim);
+  aiming = true;
+  $("aim").classList.add("on");
+  $("aim").textContent = "stop aiming";
+  $("center").hidden = false;
+  $("corner").hidden = false;
+  $("hint").textContent = "aim at the middle of the screen, tap center; then at its top-right corner, tap corner";
+};
+$("center").onclick = () => {
+  if (!look) return;
+  zero = look;
+  $("hint").textContent = "now aim at the top-right corner and tap corner (tap the pad for a ring)";
+};
+$("corner").onclick = () => {
+  if (!look || !zero) return;
+  const [turn, tilt] = turned();
+  // Too near the middle to tell the screen's size from.
+  if (Math.abs(turn) < 2 || Math.abs(tilt) < 1) {
+    $("hint").textContent = "that's close to the middle: aim right at the top-right corner and tap corner again";
+    return;
+  }
+  corner = [turn, tilt];
+  try { localStorage.setItem("deque-corner", JSON.stringify(corner)); } catch (e) {}
+  $("hint").textContent = "set: " + Math.round(Math.abs(turn) * 2) + "° wide, " + Math.round(Math.abs(tilt) * 2) + "° tall; tap center again if it drifts";
+};
+$("pad").addEventListener("mousemove", e => { if (e.buttons) { const [x, y] = at(e); post(`point/${x}/${y}`); } });
+$("pad").addEventListener("click", e => { const [x, y] = at(e); post(`tap/${x}/${y}`); });
+addEventListener("resize", size);
+poll();
+"#;
+
 /// A page or script, told not to be framed, sniffed, or named to anyone
 /// it fetches from: its address holds the token.
-fn reply(c: &mut TcpStream, kind: &str, body: &str) {
+/// And kept open, `keep`, for the next request on it.
+fn reply(c: &mut impl Write, kind: &str, body: &str, keep: bool) -> bool {
     let csp = "default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'";
-    let _ = write!(
+    let close = if keep { "" } else { "Connection: close\r\n" };
+    write!(
         c,
-        "HTTP/1.1 200 OK\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Length: {}\r\nContent-Security-Policy: {csp}\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 200 OK\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Length: {}\r\nContent-Security-Policy: {csp}\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n{close}\r\n{body}",
         body.len()
-    );
+    )
+    .and_then(|_| c.flush())
+    .is_ok()
 }
 
 /// The talk as it's drawn, till the watcher goes, or falls too far behind.
-fn stream(mut c: TcpStream, hub: &Hub) {
+fn stream(mut c: impl Write, hub: &Hub) {
     let (tx, rx) = mpsc::sync_channel(BEHIND);
     let ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
     if c.write_all(ok.as_bytes()).and_then(|_| c.write_all(b"\x1b[0m\x1b[?25l\x1b[2J\x1b[H")).is_err() {
@@ -364,6 +689,7 @@ fn hex(c: Rgb) -> String {
 /// presenter's font when it's been sent.
 fn page(hub: &Hub) -> String {
     let bg = hex(hub.0.theme.lock().unwrap().bg);
+    let token = &hub.0.token;
     let face = match hub.0.font {
         Some(_) => format!(r#"@font-face{{font-family:"deque";src:url("/{}/font")}}"#, hub.0.token),
         None => String::new(),
@@ -382,9 +708,8 @@ body{{display:flex;align-items:center;justify-content:center}}
 </style>
 <div id="t"></div>
 <script src="{XTERM}/lib/xterm.js" integrity="{XTERM_JS}" crossorigin="anonymous"></script>
-<script src="{token}/app.js"></script>
-"##,
-        token = format!("/{}", hub.0.token)
+<script src="/{token}/app.js"></script>
+"##
     )
 }
 
@@ -439,6 +764,7 @@ setTimeout(fit, 100);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpStream;
 
     fn get(port: &str, path: &str, agent: &str) -> TcpStream {
         let mut c = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
@@ -488,6 +814,108 @@ mod tests {
             let n = c.read(&mut got).unwrap();
             s.push_str(&String::from_utf8_lossy(&got[..n]));
         }
+    }
+
+    fn post(port: &str, path: &str) -> String {
+        let mut c = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        write!(c, "POST {path} HTTP/1.1\r\nContent-Length: 0\r\n\r\n").unwrap();
+        all(c)
+    }
+
+    /// A TLS client that takes deque's unsigned certificate, as a
+    /// browser does once told to.
+    #[derive(Debug)]
+    struct Any;
+
+    impl rustls::client::danger::ServerCertVerifier for Any {
+        fn verify_server_cert(
+            &self,
+            _: &rustls::pki_types::CertificateDer,
+            _: &[rustls::pki_types::CertificateDer],
+            _: &rustls::pki_types::ServerName,
+            _: &[u8],
+            _: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &rustls::pki_types::CertificateDer,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &rustls::pki_types::CertificateDer,
+            _: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+        }
+    }
+
+    /// Requests one after another over one TLS connection, and the status
+    /// line of each answer.
+    fn tls(port: &str, reqs: &[String]) -> Vec<String> {
+        let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(Any))
+            .with_no_client_auth();
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let conn = rustls::ClientConnection::new(Arc::new(cfg), name).unwrap();
+        let mut c = rustls::StreamOwned::new(conn, TcpStream::connect(format!("127.0.0.1:{port}")).unwrap());
+        reqs.iter()
+            .map(|r| {
+                c.write_all(r.as_bytes()).unwrap();
+                // The head, then as much body as it says.
+                let head = request(&mut c).unwrap_or_default();
+                let len = head.lines().find_map(|l| l.strip_prefix("content-length: ")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+                let mut body = vec![0u8; len];
+                c.read_exact(&mut body).unwrap();
+                head.lines().next().unwrap_or("").to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_remote_drives() {
+        let share = start(&Theme::default(), false, None).unwrap();
+        assert!(share.url.starts_with("https://") && share.remote.starts_with("https://"));
+        let port = share.url.rsplit(':').next().unwrap().split('/').next().unwrap().to_string();
+        let (watch, remote) = (share.url.rsplit('/').next().unwrap(), share.remote.rsplit('/').next().unwrap());
+        assert_ne!(watch, remote);
+        let post = |path: &str| format!("POST {path} HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+        // Not over plain HTTP, where its token would be there to read.
+        let mut c = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        c.write_all(post(&format!("/{remote}/do/next")).as_bytes()).unwrap();
+        assert!(all(c).starts_with("HTTP/1.1 404"));
+        assert_eq!(share.hub.take(), None);
+        // Over TLS, several on one connection; the watch link drives nothing.
+        let got = tls(
+            &port,
+            &[
+                post(&format!("/{remote}/do/next")),
+                post(&format!("/{remote}/point/0.5/0.25")),
+                post(&format!("/{remote}/do/back")),
+            ],
+        );
+        assert_eq!(got, ["http/1.1 204 no content"; 3]);
+        assert_eq!(tls(&port, &[post(&format!("/{watch}/do/next"))]), ["http/1.1 404 not found"]);
+        assert_eq!(share.hub.take().as_deref(), Some("next"));
+        assert_eq!(share.hub.take().as_deref(), Some("back"));
+        assert_eq!(share.hub.points(), [(0.5, 0.25, false)]);
+        assert_eq!(tls(&port, &[post(&format!("/{remote}/tap/2/0.25"))]), ["http/1.1 404 not found"]);
+        // Watching works either way.
+        assert!(all(get(&port, &format!("/{watch}"), "Mozilla")).starts_with("HTTP/1.1 200"));
+        let page = format!("GET /{watch} HTTP/1.1\r\n\r\n");
+        assert_eq!(tls(&port, &[page]), ["http/1.1 200 ok"]);
     }
 
     #[test]

@@ -124,6 +124,22 @@ fn canvas(s: &Screen, d: &Draw) -> (i32, i32) {
     (((s.h - d.h) / 2).max(1), ((s.w - d.w) / 2 + 1).max(1))
 }
 
+/// How lit body line i is with `shown` steps: dim when a focus step of its
+/// block is on and it isn't one of the lines lit.
+fn lit(slide: &Slide, i: usize, shown: usize) -> f64 {
+    match slide.focus.iter().rfind(|f| f.step <= shown && f.block.contains(&i)) {
+        Some(f) if !f.lines.contains(&i) => 0.3,
+        _ => 1.0,
+    }
+}
+
+/// Body line i as it's shown with `shown` steps: dimmed, if focus says.
+fn body_line(s: &Screen, slide: &Slide, i: usize, shown: usize) -> Line {
+    let k = lit(slide, i, shown);
+    let l = &slide.body[i].line;
+    if k < 1.0 { crate::fine::faded(l, k, s.theme.bg, s.theme.fg) } else { l.clone() }
+}
+
 fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
     let slide = &talk.slides[n];
     let label = label(s, slide, n);
@@ -134,6 +150,27 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
     let a = Art { rows: art, aw, ax: (s.w - aw) / 2 + 1, arow, label: label.as_ref(), lrow };
     let seen = |b: &crate::talk::Body| b.step <= shown;
     if mode == Mode::Step {
+        // A focus step: the block's lines easing to their new brightness.
+        if let Some(f) = slide.focus.iter().find(|f| f.step == shown) {
+            let frames = 10;
+            for k in 1..=frames {
+                if s.hurry {
+                    break;
+                }
+                let e = crate::screen::ease(k, frames);
+                for i in f.block.clone() {
+                    let (was, now) = (lit(slide, i, shown - 1), lit(slide, i, shown));
+                    let l = crate::fine::faded(&slide.body[i].line, was + (now - was) * e, s.theme.bg, s.theme.fg);
+                    s.center(brow + i as i32, &l);
+                }
+                s.tick(0.02);
+            }
+            for i in f.block.clone() {
+                let l = body_line(s, slide, i, shown);
+                s.center(brow + i as i32, &l);
+            }
+            return;
+        }
         if let Some((i, b)) = slide.body.iter().enumerate().find(|(_, b)| b.step == shown) {
             let row = brow + i as i32;
             s.clear_row(row);
@@ -159,8 +196,26 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
             }
         }
         let how = talk.lines(slide);
-        for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| seen(b)) {
+        for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| seen(b) && b.bar.is_none()) {
             fx::line_in(s, &how, brow + i as i32, &b.line);
+        }
+        // A chart's bars, growing together, to an eighth of a cell.
+        let bars: Vec<(usize, &crate::talk::Bar)> = slide.body.iter().enumerate().filter_map(|(i, b)| Some((i, b.bar.as_ref()?))).collect();
+        let frames = 24;
+        for f in 1..=frames {
+            if s.hurry || bars.is_empty() {
+                break;
+            }
+            for (i, bar) in &bars {
+                // Padded as the finished line is, so it's centered the same
+                // and doesn't jump when it's done.
+                let st = s.accent();
+                let mut l = bar.line(crate::screen::ease(f, frames), st);
+                let pad = markup::width(&slide.body[*i].line) - markup::width(&l);
+                l.extend(markup::plain(&" ".repeat(pad.max(0) as usize), Style::default()));
+                s.center(brow + *i as i32, &l);
+            }
+            s.tick(0.02);
         }
         for t in talk.then(slide) {
             fx::then(s, &a, &t);
@@ -183,8 +238,9 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
     if rrow > 0 {
         s.center(rrow, &rule);
     }
-    for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| seen(b)) {
-        s.center(brow + i as i32, &b.line);
+    for i in (0..slide.body.len()).filter(|&i| seen(&slide.body[i])) {
+        let l = body_line(s, slide, i, shown);
+        s.center(brow + i as i32, &l);
     }
 }
 
@@ -552,10 +608,31 @@ fn pull(s: &mut Screen, talk: &Talk, from: usize, n: usize) -> bool {
 
 /// For watchers: how to watch, on a card over the slide frosted, a QR code
 /// for phones, the link and the command, till a key.
+/// What a card says: its heading, the link for its QR code, the lines
+/// under that, and whether to copy the link.
+pub struct Card<'a> {
+    pub title: &'a str,
+    pub url: &'a str,
+    pub extra: Vec<(&'a str, &'a str)>,
+    pub copy: bool,
+}
+
 pub fn watch(s: &mut Screen, talk: &Talk, n: usize, url: &str, cmd: Option<&str>) {
+    let mut extra = vec![("open  ", url)];
+    extra.extend(cmd.map(|c| ("or run  ", c)));
+    show_card(s, talk, n, Card { title: "can't see the screen? watch along", url, extra, copy: true });
+}
+
+/// The remote's card: for the presenter's phone, not the room.
+pub fn remote(s: &mut Screen, talk: &Talk, n: usize, url: &str) {
+    let extra = vec![("open  ", url), ("", ""), ("", "next, back, your notes, and a pointer"), ("", "just you: anyone who scans this can drive the talk")];
+    show_card(s, talk, n, Card { title: "your remote", url, extra, copy: false });
+}
+
+fn show_card(s: &mut Screen, talk: &Talk, n: usize, k: Card) {
     use crossterm::event::{self, Event, KeyEventKind};
     use std::time::Duration;
-    let copied = clip(s, url);
+    let copied = k.copy && clip(s, k.url);
     let mut shown = None;
     loop {
         if shown != Some((s.w, s.h)) {
@@ -563,7 +640,7 @@ pub fn watch(s: &mut Screen, talk: &Talk, n: usize, url: &str, cmd: Option<&str>
             s.raw("\x1b[?2026h");
             behind(s, talk, n);
             s.clear();
-            card(s, url, cmd, copied);
+            card(s, &k, copied);
             s.raw("\x1b[?2026l");
             s.flush();
         }
@@ -634,10 +711,10 @@ fn clip(s: &mut Screen, text: &str) -> bool {
     false
 }
 
-fn card(s: &mut Screen, url: &str, cmd: Option<&str>, copied: bool) {
-    let code = qr(url);
+fn card(s: &mut Screen, k: &Card, copied: bool) {
+    let code = qr(k.url);
     let (acc, mt, fg) = (s.accent(), s.muted(), Style::fg(s.theme.fg));
-    let mut lines: Vec<Line> = vec![markup::plain("can't see the screen? watch along", Style { bold: true, ..acc }), vec![]];
+    let mut lines: Vec<Line> = vec![markup::plain(k.title, Style { bold: true, ..acc }), vec![]];
     // The code only where it fits, with the words under it.
     if code.len() as i32 + 8 <= s.h {
         lines.extend(code);
@@ -648,9 +725,8 @@ fn card(s: &mut Screen, url: &str, cmd: Option<&str>, copied: bool) {
         l.extend(markup::plain(what, fg));
         lines.push(l);
     };
-    row("open  ", url);
-    if let Some(cmd) = cmd {
-        row("or run  ", cmd);
+    for (label, what) in &k.extra {
+        row(label, what);
     }
     if copied {
         lines.push(vec![]);

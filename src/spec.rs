@@ -91,6 +91,7 @@ pub const SLIDE: &[Opt] = &[
     opt("enter", "a command enter runs instead of going on: a TUI, a shell, a demo. Run by sh (cmd on Windows) in the talk's folder", &[]),
     opt("cols", "with --tv, how many columns wide the screen is while `enter` runs", &[]),
     opt("draw", "a drawn slide, WIDTHxHEIGHT: its lines are drawing commands, not text", &[]),
+    opt("time", "how long the slide's meant to be up, for pacing in deque notes: 90s, 2m, 1m30s", &[]),
 ];
 
 /// Settings for the whole talk, before the first `---`.
@@ -103,6 +104,7 @@ pub const TALK: &[Opt] = &[
     opt("sky", "what moves behind every slide, unless a slide says otherwise; one sky goes on from slide to slide", SKY),
     opt("glow", "headlines lighting what's around them, unless a slide says otherwise", ON_OFF),
     opt("cursor", "whether the cursor shows; --cursor and --no-cursor win over it", ON_OFF),
+    opt("calm", "nothing moves that needn't: no skies, glow, flourishes, transitions or morphs; what arrives fades in. --calm does the same", ON_OFF),
     opt("accent", "color: headlines, and what should stand out. #rrggbb or 38;2;r;g;b", &[]),
     opt("muted", "color: asides and labels. #rrggbb or 38;2;r;g;b", &[]),
     opt("good", "color: success, and what to press. #rrggbb or 38;2;r;g;b", &[]),
@@ -130,7 +132,8 @@ pub const SYNTAX: &[(&str, &str)] = &[
     ("## ", "the slide's label, small and numbered above the headline"),
     ("# ", "the headline, in block letters"),
     ("> ", "a step: the line comes in on a key"),
-    ("```", "lines between two of these line up in a column instead of each being centered. With a language (```ts), they're code, highlighted, and taken as they are; code in the same language on the next slide morphs into its code. ```sh run runs it on a step (sh bash zsh fish py js rb), its output under the slide"),
+    ("```", "lines between two of these line up in a column instead of each being centered. With a language (```ts), they're code, highlighted, and taken as they are; code in the same language on the next slide morphs into its code. After the language: run (sh bash zsh fish py js rb) runs it on a step; a file (src/a.ts, src/a.ts:10-24, src/a.ts#name) takes its lines from there; focus: 2|4-5 lights those lines a step each. ```chart lines are a label and a number: bars"),
+    ("|", "a table row: | a | b |; a row of --- under the first makes it a header"),
     ("![", "![label](file.png): a picture. Several on one line go side by side, labelled; on lines of their own, stacked. Text lines become the caption"),
     ("//", "in a slide, a speaker note, shown by `deque notes`; before the first `---`, a comment"),
 ];
