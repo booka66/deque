@@ -566,6 +566,7 @@ function press(e) {
   heldAt = Date.now();
   travelled = 0;
   if (heldAt - lastUp > 1500) pos = [0.5, 0.5];
+  was = null;
   laser.classList.add("on");
   buzz();
   point(true);
@@ -591,45 +592,61 @@ addEventListener("blur", () => { if (holding) release(new Event("x")); });
 // Held still, the pointer's said again, so it stays lit on the screen.
 setInterval(() => { if (holding) point(true); }, 400);
 
-// Which way is up, in the phone's own axes, from its tilt; and the phone
-// turning, from its gyroscope: turning about up moves the pointer across;
-// tipping what points at the screen (its top, or its back when it's held
-// upright) moves it up and down. However it's held or rolled.
-let upv = [0, 0, 1], lastT = 0;
+// Where the phone points, from which way it's turned (its orientation,
+// which every phone reports the same way): its top, or its back when it's
+// held upright, whichever's nearer level, as a heading and an elevation.
+// Held, the pointer moves as those change; a roll of the wrist changes
+// neither.
 const D = Math.PI / 180;
-function tilt(e) {
-  if (e.beta == null || e.gamma == null) return;
-  const b = e.beta * D, g = e.gamma * D;
-  upv = [-Math.cos(b) * Math.sin(g), Math.sin(b), Math.cos(b) * Math.cos(g)];
+let was = null, axis = null, seen = 0, rate = 0;
+const debug = location.hash === "#debug";
+function aimed(e) {
+  const [a, b, g] = [e.alpha * D, e.beta * D, e.gamma * D];
+  const [sa, ca, sb, cb, sg, cg] = [Math.sin(a), Math.cos(a), Math.sin(b), Math.cos(b), Math.sin(g), Math.cos(g)];
+  const top = [-cb * sa, ca * cb, sb];
+  const back = [-(cg * sa * sb + ca * sg), -(sa * sg - ca * cg * sb), -cb * cg];
+  // Kept to one till the other's clearly nearer level, so it doesn't flip.
+  let use = axis || "top";
+  if (Math.abs(top[2]) + 0.15 < Math.abs(back[2])) use = "top";
+  else if (Math.abs(back[2]) + 0.15 < Math.abs(top[2])) use = "back";
+  const p = use === "top" ? top : back;
+  return {use, heading: Math.atan2(p[0], p[1]) / D, up: Math.asin(Math.max(-1, Math.min(1, p[2]))) / D, steep: Math.abs(p[2]) > 0.95};
 }
-function spin(e) {
-  const r = e.rotationRate;
-  if (!r || r.alpha == null) return;
-  const now = e.timeStamp || performance.now();
-  const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
-  lastT = now;
-  if (!holding || !dt) return;
-  const w = [r.beta, r.gamma, r.alpha];
-  const dotp = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  const p = Math.abs(upv[1]) < Math.abs(upv[2]) ? [0, 1, 0] : [0, 0, -1];
-  let h = [p[1] * upv[2] - p[2] * upv[1], p[2] * upv[0] - p[0] * upv[2], p[0] * upv[1] - p[1] * upv[0]];
-  const n = Math.hypot(h[0], h[1], h[2]) || 1;
-  h = h.map(v => v / n);
-  // A hand held still still shakes a little: that's left out.
-  const calm = v => Math.abs(v) < 1.2 ? 0 : v - Math.sign(v) * 1.2;
-  const yaw = calm(dotp(w, upv)), pitch = calm(dotp(w, h));
+function tilt(e) {
+  if (e.alpha == null || e.beta == null || e.gamma == null) return;
+  seen++;
+  const now = aimed(e);
+  const last = was;
+  was = now;
+  const turned = axis !== now.use;
+  axis = now.use;
+  if (debug) show(now);
+  if (!holding || !last || turned) return;
+  let dh = now.heading - last.heading;
+  dh = ((dh + 540) % 360) - 180;
+  if (now.steep || last.steep) dh = 0;
+  const du = now.up - last.up;
   const span = SPEEDS[speed][1];
-  const dx = -yaw * dt / span, dy = -pitch * dt / span * aspect;
+  const dx = dh / span, dy = -du / span * aspect;
   if (!dx && !dy) return;
   pos = [clamp(pos[0] + dx), clamp(pos[1] + dy)];
   travelled += Math.abs(dx) + Math.abs(dy);
   point();
 }
+// With #debug on the link: what the phone says, to see what's wrong.
+setInterval(() => { rate = seen; seen = 0; }, 1000);
+function show(n) {
+  $("hint").textContent = `${n.use} · heading ${n.heading.toFixed(1)} · up ${n.up.toFixed(1)} · ${rate}/s · ${holding ? "held" : "free"} · ${pos[0].toFixed(2)},${pos[1].toFixed(2)}`;
+}
+
+// Held, but the phone's said nothing of how it's turned: say so.
+setInterval(() => {
+  if (holding && ready && !rate && !debug) $("hint").textContent = "no motion from the phone: is Motion & Orientation Access on?";
+}, 1000);
 
 // The motion sensors: iPhones ask first, and only on a tap, so the first
 // tap of the button asks; everywhere else they're just on.
 function start() {
-  addEventListener("devicemotion", spin);
   addEventListener("deviceorientation", tilt);
   ready = true;
   $("hint").textContent = "";
@@ -654,7 +671,7 @@ async function enable() {
   setTimeout(() => { if ($("hint").textContent.startsWith("ready")) $("hint").textContent = ""; }, 3000);
 }
 if (!window.isSecureContext) $("hint").textContent = "pointing needs the https link";
-else if (!window.DeviceMotionEvent) $("hint").textContent = "this browser can't tell how the phone moves";
+else if (!window.DeviceOrientationEvent) $("hint").textContent = "this browser can't tell how the phone moves";
 else if (asks()) $("hint").textContent = "tap the red button once to let it use the phone's motion";
 else start();
 
