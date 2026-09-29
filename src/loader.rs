@@ -1,6 +1,7 @@
 //! While --share opens its link: the shell that was on the screen, taken
 //! as it was (from tmux, herdr, kitty or WezTerm, which can say what's on
-//! the screen; elsewhere, the command that started deque), comes loose a
+//! the screen, or Ghostty, which writes it to a file when asked; elsewhere,
+//! the command that started deque), comes loose a
 //! letter at a time from the cursor out and spirals into a galaxy, turning
 //! till the link's ready; then every letter flies to its place in the
 //! first slide.
@@ -36,7 +37,8 @@ pub fn capture(h: i32) -> Vec<Vec<Cell>> {
         .and_then(|_| run("tmux", &["capture-pane", "-p", "-e"]))
         .or_else(|| env("HERDR_PANE_ID").and_then(|id| run("herdr", &["pane", "read", &id, "--source", "visible", "--format", "ansi"])))
         .or_else(|| env("KITTY_WINDOW_ID").and_then(|_| run("kitty", &["@", "get-text", "--ansi", "--extent", "screen"])))
-        .or_else(|| env("WEZTERM_PANE").and_then(|_| run("wezterm", &["cli", "get-text", "--escapes"])));
+        .or_else(|| env("WEZTERM_PANE").and_then(|_| run("wezterm", &["cli", "get-text", "--escapes"])))
+        .or_else(ghostty);
     let mut rows: Vec<Vec<Cell>> = match text {
         Some(t) => t.lines().map(sgr).collect(),
         None => {
@@ -53,6 +55,53 @@ pub fn capture(h: i32) -> Vec<Vec<Cell>> {
         rows.drain(..rows.len() - keep);
     }
     rows
+}
+
+/// Ghostty's screen, colors and all: on macOS, asked by AppleScript to
+/// write it to a file and paste the file's name in, which comes to deque
+/// as keys (the clipboard's left alone). Only when Ghostty's in front, as
+/// it is when enter's just started deque in it. Raw mode must be on, so
+/// what's pasted isn't echoed.
+fn ghostty() -> Option<String> {
+    use crossterm::event::{self, Event, KeyCode};
+    if !cfg!(target_os = "macos") || std::env::var("TERM_PROGRAM").ok()? != "ghostty" {
+        return None;
+    }
+    let script = r#"tell application "Ghostty"
+        if not frontmost then return "no"
+        perform action "write_screen_file:paste,vt" on focused terminal of selected tab of front window
+        return "ok"
+    end tell"#;
+    let out = Command::new("osascript").args(["-e", script]).output().ok()?;
+    if String::from_utf8_lossy(&out.stdout).trim() != "ok" {
+        return None;
+    }
+    // The file's name, typed in; done when nothing more comes for a moment.
+    let (mut path, t) = (String::new(), Instant::now());
+    while t.elapsed() < Duration::from_secs(2) {
+        if !event::poll(Duration::from_millis(if path.ends_with(".txt") { 60 } else { 200 })).ok()? {
+            if path.ends_with(".txt") {
+                break;
+            }
+            continue;
+        }
+        if let Ok(Event::Key(k)) = event::read()
+            && let KeyCode::Char(c) = k.code
+        {
+            path.push(c);
+        }
+    }
+    let file = std::path::PathBuf::from(path.trim());
+    if file.file_name()? != "screen.txt" {
+        return None;
+    }
+    let text = std::fs::read_to_string(&file).ok();
+    // Gone once read, and the folder made for it, if that leaves it empty.
+    let _ = std::fs::remove_file(&file);
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+    text
 }
 
 /// A line with SGR colors in it as cells in those colors; any other escape
@@ -241,7 +290,7 @@ pub fn spin<T>(s: &mut Screen, rows: &[Vec<Cell>], th: &Theme, mut ready: impl F
         let mut f = frame(s, &motes);
         if t > 1.2 {
             let dots = ".".repeat((t * 2.5) as usize % 4);
-            let text = format!("opening a link{dots:<3}");
+            let text = format!("shuffling your deque{dots:<3}");
             let col = (s.w - text.chars().count() as i32) / 2;
             for (i, ch) in text.chars().enumerate() {
                 let at = (s.h / 2) as usize * s.w as usize + (col as usize + i);

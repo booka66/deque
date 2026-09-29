@@ -324,8 +324,9 @@ fn present(args: &[String]) -> Result<(), String> {
             let dir = path.parent().unwrap_or(Path::new("."));
             let th = std::fs::read_to_string(&path).map(|src| talk::parse(&src, dir, true).0.theme).unwrap_or_default();
             let mut ls = Screen::new(th.clone());
-            let rows = loader::capture(ls.h);
+            // Raw first: Ghostty's screen comes as keys, not to be echoed.
             terminal::enable_raw_mode().map_err(|e| e.to_string())?;
+            let rows = loader::capture(ls.h);
             ls.raw("\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J");
             match loader::spin(&mut ls, &rows, &th, || rx.try_recv().ok()) {
                 Some((Ok(sh), motes)) => {
