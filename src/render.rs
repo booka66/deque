@@ -460,38 +460,49 @@ pub fn print_all(talk: &Talk, color: bool) -> String {
 /// Every slide in a grid, to pick one from: arrows move, enter goes, esc
 /// or o leaves. The slide on the screen is marked.
 pub fn overview(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
+    let got = pick(s, talk, now);
+    s.thaw();
+    got
+}
+
+/// Slide k drawn whole and frozen behind the list, frosted.
+fn behind(s: &mut Screen, talk: &Talk, k: usize) {
+    let slide = &talk.slides[k];
+    s.thaw();
+    s.keep();
+    match &slide.draw {
+        _ if !slide.images.is_empty() => s.clear(),
+        Some(d) => drawn(s, talk, k, d, Mode::Still, slide.steps()),
+        None => text(s, talk, k, Mode::Still, slide.steps()),
+    }
+    s.frost();
+}
+
+fn pick(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use std::time::Duration;
     let total = talk.slides.len() as i32;
     let mut sel = now as i32;
+    let mut shown = None;
     loop {
         let cw = 30.min(s.w - 2).max(8);
         let cols = ((s.w - 2) / cw).max(1);
-        let rows = (total + cols - 1) / cols;
-        let fit = (s.h - 4).max(1);
-        // Scrolled so the selection shows.
-        let top = ((sel / cols) - fit + 1).max(0).min((rows - fit).max(0));
-        s.clear();
-        let st = s.muted();
-        s.put_str(1, 2, "slides · arrows move · enter goes · esc back", st);
-        for i in 0..total {
-            let (r, c) = (i / cols - top, i % cols);
-            if r < 0 || r >= fit {
-                continue;
-            }
-            let slide = &talk.slides[i as usize];
-            let mark = if i as usize == now { "●" } else { " " };
-            let text = format!("{mark}{:>3} {}", i + 1, slide.title());
-            let text: String = text.chars().take((cw - 2) as usize).collect();
-            let st = if i == sel {
-                Style { fg: Some(s.theme.bg), bg: Some(s.theme.accent), bold: true }
-            } else if i as usize == now {
-                s.accent()
-            } else {
-                Style::default()
-            };
-            s.put_str(3 + r, 2 + c * cw, &text, st);
+        // Drawn again when the selection moves: the slide it's on, frosted
+        // behind, then the list, in one frame.
+        if shown != Some((sel, s.w, s.h)) {
+            shown = Some((sel, s.w, s.h));
+            s.raw("\x1b[?2026h");
+            behind(s, talk, sel as usize);
+            list(s, talk, now, sel as usize, cw, cols);
+            s.raw("\x1b[?2026l");
+            s.flush();
         }
-        s.flush();
+        // The sky goes on behind the list.
+        if !event::poll(Duration::from_millis(15)).unwrap_or(false) {
+            s.sky_frame();
+            s.flush();
+            continue;
+        }
         let Ok(ev) = event::read() else { return None };
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => match k.code {
@@ -509,6 +520,34 @@ pub fn overview(s: &mut Screen, talk: &Talk, now: usize) -> Option<usize> {
             _ => {}
         }
         sel = sel.clamp(0, total - 1);
+    }
+}
+
+/// The slides in a grid, cw columns wide, scrolled so the selection shows.
+fn list(s: &mut Screen, talk: &Talk, now: usize, sel: usize, cw: i32, cols: i32) {
+    let total = talk.slides.len() as i32;
+    let rows = (total + cols - 1) / cols;
+    let fit = (s.h - 4).max(1);
+    let top = ((sel as i32 / cols) - fit + 1).max(0).min((rows - fit).max(0));
+    s.clear();
+    let st = s.muted();
+    s.put_str(1, 2, "slides · arrows move · enter goes · esc back", st);
+    for i in 0..total as usize {
+        let (r, c) = (i as i32 / cols - top, i as i32 % cols);
+        if r < 0 || r >= fit {
+            continue;
+        }
+        let mark = if i == now { "●" } else { " " };
+        let text = format!("{mark}{:>3} {}", i + 1, talk.slides[i].title());
+        let text: String = text.chars().take((cw - 2) as usize).collect();
+        let st = if i == sel {
+            Style { fg: Some(s.theme.bg), bg: Some(s.theme.accent), bold: true }
+        } else if i == now {
+            s.accent()
+        } else {
+            Style::default()
+        };
+        s.put_str(3 + r, 2 + c * cw, &text, st);
     }
 }
 

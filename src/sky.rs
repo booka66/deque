@@ -77,6 +77,9 @@ pub struct Sky {
     kernel: Vec<(i32, i32, f64)>,
     /// The cells near text, this frame.
     quiet: Vec<bool>,
+    /// A screen frozen and blurred, a color and how much of it each pixel
+    /// takes, behind whatever's drawn now.
+    frost: Option<Vec<(Rgb, f64)>>,
 }
 
 pub const QUAD: [char; 16] = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█'];
@@ -161,6 +164,7 @@ impl Sky {
             t: 0.0,
             kernel,
             quiet: vec![],
+            frost: None,
         };
         s.fill();
         s
@@ -241,10 +245,56 @@ impl Sky {
         if self.glow {
             self.shine(t, base, theme.accent, front, w);
         }
+        if let Some(f) = &self.frost {
+            for (p, (c, k)) in self.field.iter_mut().zip(f) {
+                *p = p.mix(*c, *k);
+            }
+        }
         self.px.copy_from_slice(&self.field);
         self.hush(front, w);
         self.draw(t, theme);
         self.quiet.clear();
+    }
+
+    /// What's on the screen now, frozen and blurred, to stay behind what's
+    /// drawn next: blocks at full strength, letters as a haze, each in its
+    /// own color.
+    pub fn freeze(&mut self, front: &[Option<Cell>], w: usize, th: &Theme) {
+        let mut ink = vec![[0.0f64; 4]; self.pw * self.ph];
+        for (i, c) in front.iter().enumerate() {
+            let Some(c) = c else { continue };
+            let k = match QUAD.iter().position(|&q| q == c.ch) {
+                Some(m) => m.count_ones() as f64 / 4.0,
+                None if c.ch == ' ' => 0.0,
+                None if ('\u{2500}'..='\u{257f}').contains(&c.ch) => 0.15,
+                None => 0.3,
+            };
+            let col = c.st.fg.unwrap_or(th.fg);
+            let (x, y) = ((i % w) * 2, (i / w) * 2);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                if x + dx < self.pw && y + dy < self.ph {
+                    ink[(y + dy) * self.pw + x + dx] = [k, k * col.0 as f64, k * col.1 as f64, k * col.2 as f64];
+                }
+            }
+        }
+        // Twice a box across and down, near enough a gaussian; half as far
+        // down, a pixel being twice as tall as wide.
+        for _ in 0..2 {
+            blur(&mut ink, self.pw, self.ph, 5, 1);
+            blur(&mut ink, self.pw, self.ph, 3, self.pw);
+        }
+        self.frost = Some(
+            ink.iter()
+                .map(|a| match a[0] > 1e-3 {
+                    true => (Rgb((a[1] / a[0]) as u8, (a[2] / a[0]) as u8, (a[3] / a[0]) as u8), (a[0] * 1.3).min(1.0) * 0.42),
+                    false => (Rgb::default(), 0.0),
+                })
+                .collect(),
+        );
+    }
+
+    pub fn thaw(&mut self) {
+        self.frost = None;
     }
 
     /// Where text is, and a cell round it: the sky goes faint there, so
@@ -455,6 +505,29 @@ impl Sky {
                 Cell { ch: f.ch, st: Style { bg: Some(bg), ..f.st } }
             }
             None => quad([self.px[i(0, 0)], self.px[i(0, 1)], self.px[i(1, 0)], self.px[i(1, 1)]]),
+        }
+    }
+}
+
+/// Each pixel the average of those within r of it one way, `step` apart
+/// in the buffer: 1 across a row, the row's length down a column.
+fn blur(v: &mut [[f64; 4]], w: usize, h: usize, r: usize, step: usize) {
+    let (lines, len, gap) = if step == 1 { (h, w, w) } else { (w, h, 1) };
+    let mut buf = vec![[0.0; 4]; len];
+    for l in 0..lines {
+        let at = |i: usize| l * gap + i * step;
+        for (i, b) in buf.iter_mut().enumerate() {
+            let (lo, hi) = (i.saturating_sub(r), (i + r).min(len - 1));
+            let mut s = [0.0; 4];
+            for j in lo..=hi {
+                for k in 0..4 {
+                    s[k] += v[at(j)][k];
+                }
+            }
+            *b = s.map(|x| x / (2 * r + 1) as f64);
+        }
+        for (i, b) in buf.iter().enumerate() {
+            v[at(i)] = *b;
         }
     }
 }

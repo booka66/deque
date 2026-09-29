@@ -149,12 +149,40 @@ impl Screen {
             s.glow = glow;
             return;
         }
+        self.make_sky(kind, glow);
+    }
+
+    fn make_sky(&mut self, kind: Kind, glow: bool) {
         let n = (self.w * self.h).max(0) as usize;
         (self.front, self.seen) = (vec![None; n], vec![None; n]);
         let mut sky = Sky::new(kind, glow, self.w, self.h, self.rng.below(1 << 30) as u32);
         self.sky_at = self.now();
         sky.frame(self.sky_at, &self.theme, &self.front, self.w as usize);
         self.sky = Some(sky);
+    }
+
+    /// Whatever's on the screen, frozen and blurred behind what's drawn
+    /// next, until thawed; with a sky of nothing, if the slide has none.
+    pub fn frost(&mut self) {
+        let now = self.now();
+        let Some(sky) = self.sky.as_mut() else { return };
+        sky.freeze(&self.front, self.w as usize, &self.theme);
+        sky.frame(now, &self.theme, &self.front, self.w as usize);
+    }
+
+    /// Ready to frost: the screen kept cell by cell from here on.
+    pub fn keep(&mut self) {
+        if self.sky.is_none() {
+            self.make_sky(Kind::None, false);
+        }
+    }
+
+    pub fn thaw(&mut self) {
+        match self.sky.as_mut() {
+            Some(s) if s.kind == Kind::None && !s.glow => self.sky = None,
+            Some(s) => s.thaw(),
+            None => {}
+        }
     }
 
     /// The sky moved on and drawn again where it changed, when a frame of
