@@ -931,8 +931,7 @@ setInterval(() => {
 }, 1000);
 
 // The laser: held, the pointer's on the screen and moves as the phone
-// turns, from the middle (or from where it was, let go of only just now);
-// let go, it's out. A quick press is a ring. Nothing to set up and nothing
+// turns, from the middle every time; let go, it's out. A quick press is a ring. Nothing to set up and nothing
 // to drift: it goes by how the phone turns, not where it points, so if
 // it's off, turn past the edge and it catches up, as a mouse does.
 let pos = [0.5, 0.5], sending = false, lastSent = 0;
@@ -958,7 +957,7 @@ function press(e) {
   holding = true;
   heldAt = Date.now();
   travelled = 0;
-  if (heldAt - lastUp > 1500) pos = [0.5, 0.5];
+  pos = [0.5, 0.5];
   was = null;
   laser.classList.add("on");
   buzz();

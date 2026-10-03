@@ -1,5 +1,5 @@
 //! What's behind a slide, alive the whole time it's up: `sky:` stars,
-//! snow, rain, embers or life, and `glow:`, a light the headline's letters
+//! snow, rain, embers, life, boids, fireflies, sand, koi or ants, and `glow:`, a light the headline's letters
 //! give off onto what's around them, breathing.
 //!
 //! It's drawn in pixels four to a cell, two across and two down: a cell's
@@ -21,11 +21,15 @@ pub enum Kind {
     Life,
     Boids,
     Fireflies,
+    Sand,
+    Koi,
+    Ants,
 }
 
 impl Kind {
+    /// A sky by its name, the first word of what `sky:` says.
     pub fn from(name: &str) -> Kind {
-        match name {
+        match name.split_whitespace().next().unwrap_or("") {
             "stars" => Kind::Stars,
             "snow" => Kind::Snow,
             "rain" => Kind::Rain,
@@ -33,9 +37,78 @@ impl Kind {
             "life" => Kind::Life,
             "boids" => Kind::Boids,
             "fireflies" => Kind::Fireflies,
+            "sand" => Kind::Sand,
+            "koi" => Kind::Koi,
+            "ants" => Kind::Ants,
             _ => Kind::None,
         }
     }
+}
+
+/// How many `sky:` says, the numbers after its name: `boids 12 3` is twelve
+/// birds and three hawks.
+pub fn many(name: &str) -> [Option<usize>; 2] {
+    let mut n = name.split_whitespace().skip(1).filter_map(|w| w.parse().ok());
+    [n.next(), n.next()]
+}
+
+/// What else `sky:` says, the words after its name that aren't numbers:
+/// `ants ground fire 80` says `ground fire`.
+pub fn said(name: &str) -> String {
+    name.split_whitespace().skip(1).filter(|w| w.parse::<usize>().is_err()).collect::<Vec<_>>().join(" ")
+}
+
+/// The most of anything, however many the talk says.
+const MOST: usize = 600;
+
+/// A koi, in a space where a step down is as long as a step across: x in
+/// pixels, y in half pixels, a pixel being twice as tall as wide.
+#[derive(Clone)]
+struct Koi {
+    /// Its head, then each joint of its back, then its tail fin's two.
+    spine: Vec<(f64, f64)>,
+    x: f64,
+    y: f64,
+    /// Where it's heading, how fast it's turning, and its speed.
+    dir: f64,
+    turn: f64,
+    v: f64,
+    /// How far through a stroke of its tail it is.
+    beat: f64,
+    size: f64,
+    ph: f64,
+    /// Its markings, and which way it turns off from text.
+    look: u8,
+    side: f64,
+}
+
+/// How wide a koi is at each joint from its head, half across, and then
+/// its tail fin's.
+const GIRTH: [f64; 10] = [2.5, 3.9, 4.4, 4.3, 3.8, 3.1, 2.4, 1.7, 1.2, 0.8];
+const FIN: [f64; 2] = [2.4, 4.4];
+/// From one joint to the next.
+const JOINT: f64 = 3.6;
+
+/// A koi's two colors and how much of it the second covers: white with
+/// red, all orange, white with orange, gold.
+const COATS: [(Rgb, Rgb, f64); 4] = [
+    (Rgb(244, 238, 226), Rgb(214, 58, 36), 0.1),
+    (Rgb(240, 120, 34), Rgb(246, 160, 60), 0.3),
+    (Rgb(244, 238, 226), Rgb(240, 120, 34), -0.1),
+    (Rgb(236, 180, 70), Rgb(244, 238, 226), 0.6),
+];
+const DEEP: Rgb = Rgb(14, 62, 78);
+const LIGHT: Rgb = Rgb(120, 200, 205);
+const PAD: Rgb = Rgb(58, 132, 76);
+const FOOD: Rgb = Rgb(214, 168, 96);
+/// How long food floats before it's gone, in seconds, and how much can be
+/// on the water at once.
+const FLOATS_FOR: f64 = 30.0;
+const MOST_FOOD: usize = 80;
+
+/// From a to b turning the short way, -π to π.
+fn veer(a: f64, b: f64) -> f64 {
+    (b - a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 
 /// Something moving, in pixels: where, how fast, and how it looks.
@@ -93,6 +166,30 @@ pub struct Sky {
     pub trail: Vec<(f64, f64, f64)>,
     /// With boids: hawks, bigger and faster, after the nearest bird.
     hawks: Vec<Mote>,
+    /// How many the talk asked for, and of hawks; and what else it said
+    /// of the sky, which a sky of another sort wouldn't be.
+    pub many: [Option<usize>; 2],
+    pub said: String,
+    /// The ant colony, made when it's first needed, knowing by then what
+    /// the talk said of it.
+    ants: Option<crate::ants::Colony>,
+    seed: u32,
+    /// The cells with text in them, this frame: what snow and sand lie on
+    /// and birds perch on.
+    text: Vec<bool>,
+    /// Snow that's settled, a pixel each, melting from 1 to 0.
+    drift: Vec<f64>,
+    /// Sand's floor is open: it's running out.
+    draining: bool,
+    /// The pond: its fish, its lily pads (where, how big, and where the
+    /// notch is), the food on the water (where each bit is, and when it
+    /// fell), when a click last dropped some, and the rings where a bit
+    /// was taken (where, and when).
+    koi: Vec<Koi>,
+    pads: Vec<(f64, f64, f64, f64)>,
+    food: Vec<(f64, f64, f64)>,
+    fed: f64,
+    rings: Vec<(f64, f64, f64)>,
     /// Watchers' reactions, rising up the right of the screen.
     pub floats: Vec<Float>,
 }
@@ -199,6 +296,18 @@ impl Sky {
             ripples: vec![],
             trail: vec![],
             hawks: vec![],
+            many: [None; 2],
+            said: String::new(),
+            ants: None,
+            seed,
+            text: vec![],
+            drift: vec![0.0; pw * ph],
+            draining: false,
+            koi: vec![],
+            pads: vec![],
+            food: vec![],
+            fed: f64::NEG_INFINITY,
+            rings: vec![],
             floats: vec![],
         };
         s.fill();
@@ -209,34 +318,78 @@ impl Sky {
         self.rng.below(1 << 20) as f64 / (1 << 20) as f64
     }
 
-    /// The motes it starts with, spread over the whole screen, so it's
-    /// already going when the slide comes.
+    /// What it starts with, spread over the whole screen, so it's already
+    /// going when the slide comes.
     fn fill(&mut self) {
+        if self.kind == Kind::Life {
+            for i in 0..self.cells.len() {
+                self.cells[i] = self.rand() < 0.16;
+            }
+        }
+        if self.kind == Kind::Koi {
+            let (w, h) = (self.pw as f64, self.ph as f64 * 2.0);
+            for _ in 0..(self.pw * self.ph / 4500).clamp(2, 6) {
+                let pad = (w * self.rand(), h * self.rand(), 6.0 + 5.0 * self.rand(), 6.3 * self.rand());
+                self.pads.push(pad);
+            }
+        }
+        self.crowd([None; 2]);
+    }
+
+    /// Its ant colony, taken out, to be kept while another sky's up; and
+    /// one kept put back, to go on from where it was.
+    pub fn take_ants(&mut self) -> Option<crate::ants::Colony> {
+        self.ants.take()
+    }
+
+    pub fn give_ants(&mut self, mut a: crate::ants::Colony) {
+        a.resize(self.pw, self.ph);
+        a.cap(self.many[0]);
+        self.ants = Some(a);
+    }
+
+    /// How many there are when the talk doesn't say: by the screen's size.
+    fn usual(&self) -> usize {
         let area = (self.pw * self.ph) as f64;
-        let n = match self.kind {
+        (match self.kind {
             Kind::Stars => area / 110.0,
             Kind::Snow => self.pw as f64 / 2.5,
             Kind::Rain => self.pw as f64 / 3.0,
             Kind::Embers => self.pw as f64 / 2.5,
             Kind::Boids => (area / 160.0).max(40.0),
             Kind::Fireflies => 18.0,
-            Kind::Life => {
-                for i in 0..self.cells.len() {
-                    self.cells[i] = self.rand() < 0.16;
-                }
-                0.0
-            }
-            Kind::None => 0.0,
-        } as usize;
-        for _ in 0..n {
+            Kind::Koi => (area / 2400.0).clamp(3.0, 9.0),
+            _ => 0.0,
+        }) as usize
+    }
+
+    /// As many as the talk says (`sky: boids 12 3`: twelve birds, three
+    /// hawks), or as many as suit the screen: more come, or the last go.
+    pub fn crowd(&mut self, many: [Option<usize>; 2]) {
+        self.many = many;
+        if let Some(a) = self.ants.as_mut() {
+            a.cap(many[0]);
+        }
+        let n = many[0].filter(|_| self.usual() > 0).map_or(self.usual(), |n| n.min(MOST));
+        let (fish, n) = if self.kind == Kind::Koi { (n.min(40), 0) } else { (0, n) };
+        self.motes.truncate(n);
+        while self.motes.len() < n {
             let m = self.spawn(true);
             self.motes.push(m);
         }
-        if self.kind == Kind::Boids {
-            for _ in 0..2 {
-                let m = self.spawn(true);
-                self.hawks.push(Mote { vx: m.vx * 1.4, vy: m.vy * 1.4, ..m });
-            }
+        let hawks = if self.kind == Kind::Boids { many[1].unwrap_or(2).min(MOST) } else { 0 };
+        self.hawks.truncate(hawks);
+        while self.hawks.len() < hawks {
+            let m = self.spawn(true);
+            self.hawks.push(Mote { vx: m.vx * 1.4, vy: m.vy * 1.4, ..m });
+        }
+        self.koi.truncate(fish);
+        while self.koi.len() < fish {
+            let (x, y, dir) = (self.rand() * self.pw as f64, self.rand() * self.ph as f64 * 2.0, self.rand() * 6.283);
+            let (size, ph, look, side) = (0.75 + 0.45 * self.rand(), self.rand() * 6.3, self.rng.below(4) as u8, if self.rng.below(2) == 0 { 1.0 } else { -1.0 });
+            // Straight out behind its head, to start.
+            let spine = (0..GIRTH.len() + FIN.len()).map(|k| (x - dir.cos() * JOINT * size * k as f64, y - dir.sin() * JOINT * size * k as f64)).collect();
+            self.koi.push(Koi { spine, x, y, dir, turn: 0.0, v: 9.0, beat: ph, size, ph, look, side });
         }
     }
 
@@ -312,10 +465,23 @@ impl Sky {
         // Where text is first, for what steers around it.
         self.hush(front, w);
         self.step(dt, t);
-        let base = theme.bg;
+        let base = if self.kind == Kind::Koi { theme.bg.mix(DEEP, 0.45) } else { theme.bg };
         self.field.fill(base);
         if self.glow {
             self.shine(t, base, theme.accent, front, w);
+        }
+        if self.kind == Kind::Koi {
+            self.water(t);
+        }
+        if self.kind == Kind::Ants {
+            let (pw, ph, seed, said, cap) = (self.pw, self.ph, self.seed, self.said.clone(), self.many[0]);
+            let a = self.ants.get_or_insert_with(|| crate::ants::Colony::new(pw, ph, seed, &said, cap));
+            a.view(said.split_whitespace().any(|w| w == "ground"));
+            // A click drops food.
+            let clicks: Vec<(f64, f64)> = self.ripples.iter().filter(|r| r.2 > self.fed).map(|r| (r.0, r.1)).collect();
+            self.fed = self.ripples.iter().fold(self.fed, |m, r| m.max(r.2));
+            a.step(dt, t, &self.text, &clicks);
+            a.back(&mut self.field, theme);
         }
         if let Some(f) = &self.frost {
             for (p, (c, k)) in self.field.iter_mut().zip(f) {
@@ -410,6 +576,7 @@ impl Sky {
     fn hush(&mut self, front: &[Option<Cell>], w: usize) {
         let h = front.len() / w.max(1);
         self.quiet = vec![false; front.len()];
+        self.text = front.iter().map(Option::is_some).collect();
         for (i, _) in front.iter().enumerate().filter(|(_, f)| f.is_some()) {
             let (r, c) = ((i / w) as i32, (i % w) as i32);
             for dr in -1..=1 {
@@ -437,13 +604,36 @@ impl Sky {
                 Kind::Embers => m.age > m.life || m.y < -1.0,
                 _ => false,
             };
-            if gone {
+            // Snow comes to rest on the text it falls onto, where it's drawn.
+            let landed = self.kind == Kind::Snow && self.lands(m.x + 1.6 * (t * 0.9 + m.ph).sin(), m.y);
+            if gone || landed {
                 m = self.spawn(false);
             }
             self.motes[i] = m;
         }
         match self.kind {
             Kind::Boids => self.flock(dt),
+            Kind::Koi => self.swim(dt, t),
+            Kind::Snow => {
+                // What's settled melts in its time, and goes at once when
+                // what it lay on does.
+                for y in (0..self.ph).rev() {
+                    for x in 0..self.pw {
+                        let i = y * self.pw + x;
+                        if self.drift[i] > 0.0 {
+                            let (x, y) = (x as i32, y as i32);
+                            let held = !self.solid(x, y) && (self.solid(x, y + 1) || self.drift.get(i + self.pw).is_some_and(|d| *d > 0.0));
+                            self.drift[i] = if held { (self.drift[i] - dt / 30.0).max(0.0) } else { 0.0 };
+                        }
+                    }
+                }
+            }
+            Kind::Sand => {
+                while t - self.beat >= 0.04 {
+                    self.beat = if t - self.beat > 1.0 { t } else { self.beat + 0.04 };
+                    self.pour(t);
+                }
+            }
             Kind::Fireflies => {
                 // Each wanders on its own slow curve, round the edges.
                 for m in &mut self.motes {
@@ -477,6 +667,288 @@ impl Sky {
             for i in 0..self.lit.len() {
                 let to = if self.cells[i] { 1.0 } else { 0.0 };
                 self.lit[i] += (to - self.lit[i]) * k;
+            }
+        }
+    }
+
+    /// Whether the pixel's in a cell with text in it.
+    fn solid(&self, x: i32, y: i32) -> bool {
+        x >= 0 && y >= 0 && (x as usize) < self.pw && self.text.get(y as usize / 2 * (self.pw / 2) + x as usize / 2).is_some_and(|t| *t)
+    }
+
+    /// A snowflake at (x, y) settling there, if it's just over text, or
+    /// over a flake that is: two deep at most.
+    fn lands(&mut self, x: f64, y: f64) -> bool {
+        let (x, y) = (x.round() as i32, y.round() as i32);
+        if x < 0 || y < 0 || x as usize >= self.pw || y as usize + 2 >= self.ph || self.solid(x, y) {
+            return false;
+        }
+        let i = y as usize * self.pw + x as usize;
+        let on = self.solid(x, y + 1) || (self.drift[i + self.pw] > 0.0 && self.solid(x, y + 2));
+        if on && self.drift[i] == 0.0 {
+            self.drift[i] = 1.0;
+        }
+        on && self.drift[i] == 1.0
+    }
+
+    /// Whether a grain of sand could be at the pixel.
+    fn free(&self, x: i32, y: i32) -> bool {
+        x >= 0 && (x as usize) < self.pw && (y as usize) < self.ph && !self.cells[y as usize * self.pw + x as usize] && !self.solid(x, y)
+    }
+
+    /// Sand a step on: more poured in at the top from three spouts that
+    /// wander, each grain falling till it lies on text, the floor or other
+    /// sand, and sliding off a heap too steep. Deep enough, the floor
+    /// opens and it runs out.
+    fn pour(&mut self, t: f64) {
+        let (w, h) = (self.pw, self.ph);
+        for y in (0..h - 1).rev() {
+            for x in 0..w {
+                let i = y * w + x;
+                if !self.cells[i] {
+                    continue;
+                }
+                // Text came where it lay.
+                if self.solid(x as i32, y as i32) {
+                    self.cells[i] = false;
+                    continue;
+                }
+                let side = if self.rng.below(2) == 0 { 1 } else { -1 };
+                let to = [0, side, -side].into_iter().map(|d| x as i32 + d).find(|&nx| self.free(nx, y as i32 + 1));
+                if let Some(nx) = to {
+                    self.cells[i] = false;
+                    self.cells[(y + 1) * w + nx as usize] = true;
+                }
+            }
+        }
+        let floor = (h - 1) * w;
+        if self.cells.iter().filter(|c| **c).count() > w * h / 7 {
+            self.draining = true;
+        }
+        if self.draining {
+            self.draining = self.cells[floor..].iter().any(|c| *c);
+            self.cells[floor..].fill(false);
+            return;
+        }
+        for k in 0..3 {
+            let k = k as f64;
+            let x = (w as f64 * (0.5 + 0.45 * (t * (0.05 + 0.03 * k) + 2.1 * k).sin())) as i32 + self.rng.below(3);
+            if self.free(x, 0) {
+                self.cells[x as usize] = true;
+            }
+        }
+    }
+
+    /// The pond's fish a moment on. Each wanders, turning off from the
+    /// edges and from text. A click scatters food on the water: each fish
+    /// makes for the bit nearest it, slowing as it comes up to it, and
+    /// takes it, a ring going out from where it was. Its head sways as its tail beats, and each joint of its back
+    /// follows the one before, so the sway runs down it.
+    fn swim(&mut self, dt: f64, t: f64) {
+        let (w, h) = (self.pw as f64, self.ph as f64 * 2.0);
+        for (x, y, at) in self.ripples.clone() {
+            if at > self.fed {
+                self.fed = at;
+                for _ in 0..6 {
+                    let bit = (x + 9.0 * (self.rand() - 0.5), y * 2.0 + 9.0 * (self.rand() - 0.5), t);
+                    if self.food.len() < MOST_FOOD {
+                        self.food.push(bit);
+                    }
+                }
+            }
+        }
+        self.food.retain(|f| t - f.2 < FLOATS_FOR);
+        self.rings.retain(|r| t - r.2 < 1.0);
+        let (cols, quiet) = (self.pw / 2, &self.quiet);
+        let near_text = |x: f64, y: f64| x >= 0.0 && y >= 0.0 && x < w && y < h && quiet.get(y as usize / 4 * cols + x as usize / 2).is_some_and(|q| *q);
+        let heads: Vec<(f64, f64)> = self.koi.iter().map(|k| (k.x, k.y)).collect();
+        for (i, k) in self.koi.iter_mut().enumerate() {
+            let mut want = 0.25 * (t * 0.23 + k.ph).sin() + 0.15 * (t * 0.61 + k.ph * 2.3).sin();
+            let mut speed = (8.5 + 3.0 * (t * 0.3 + k.ph).sin()) * k.size;
+            // Near an edge, or past it: round toward the middle.
+            let edge = 30.0;
+            if k.x < edge || k.y < edge || k.x > w - edge || k.y > h - edge {
+                want += 0.8 * veer(k.dir, (h / 2.0 - k.y).atan2(w / 2.0 - k.x));
+            }
+            // Text ahead, near or further: off to its own side of it.
+            if [22.0, 44.0].iter().any(|d| near_text(k.x + k.dir.cos() * d, k.y + k.dir.sin() * d)) {
+                want += 0.9 * k.side;
+            }
+            // Another's head close by: away from it.
+            for (j, o) in heads.iter().enumerate() {
+                if i != j && (o.0 - k.x).powi(2) + (o.1 - k.y).powi(2) < 28.0 * 28.0 {
+                    want -= 0.4 * veer(k.dir, (o.1 - k.y).atan2(o.0 - k.x)).signum();
+                }
+            }
+            let far = |f: &(f64, f64, f64)| (f.0 - k.x).powi(2) + (f.1 - k.y).powi(2);
+            let mut most = 0.8;
+            if let Some(b) = (0..self.food.len()).min_by(|&a, &b| far(&self.food[a]).total_cmp(&far(&self.food[b]))) {
+                let (fx, fy, _) = self.food[b];
+                let d = far(&self.food[b]).sqrt();
+                if d < 5.0 * k.size {
+                    self.food.swap_remove(b);
+                    self.rings.push((fx, fy, t));
+                } else {
+                    // Quick to it from far off; close, slow, and turning
+                    // tighter, so it doesn't go round and round it.
+                    want += 1.6 * veer(k.dir, (fy - k.y).atan2(fx - k.x));
+                    speed *= 0.6 + (d / 25.0).min(1.2);
+                    most = if d < 30.0 { 1.8 } else { 0.8 };
+                }
+            }
+            // Eased, so it never jerks round or lurches off.
+            k.turn += (want.clamp(-most, most) - k.turn) * (dt * 2.0).min(1.0);
+            k.v += (speed - k.v) * (dt * 1.5).min(1.0);
+            k.dir += k.turn * dt;
+            k.x += k.dir.cos() * k.v * dt;
+            k.y += k.dir.sin() * k.v * dt;
+            k.beat += (2.0 + k.v * 0.3) * dt;
+            let sway = 1.5 * k.size * k.beat.sin();
+            k.spine[0] = (k.x - k.dir.sin() * sway, k.y + k.dir.cos() * sway);
+            for i in 1..k.spine.len() {
+                let (a, b) = (k.spine[i - 1], k.spine[i]);
+                let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt().max(1e-6);
+                let len = JOINT * k.size;
+                k.spine[i] = (a.0 + (b.0 - a.0) / d * len, a.1 + (b.1 - a.1) / d * len);
+            }
+        }
+    }
+
+    /// Light on the water, into the field: slow bands crossing, in a few
+    /// steps of brightness, so the cells they light change now and then,
+    /// not every frame.
+    fn water(&mut self, t: f64) {
+        for y in 0..self.ph {
+            let yy = y as f64 * 2.0;
+            for x in 0..self.pw {
+                let xx = x as f64;
+                let v = (xx * 0.11 + t * 0.35 + 1.7 * (yy * 0.07 + t * 0.21).sin()).sin() + (yy * 0.09 - t * 0.27 + 1.3 * (xx * 0.05 - t * 0.17).sin()).sin();
+                let k = ((v * 0.5).max(0.0).powi(2) * 4.0).round() / 4.0;
+                if k > 0.0 {
+                    let p = &mut self.field[y * self.pw + x];
+                    *p = p.mix(LIGHT, 0.1 * k);
+                }
+            }
+        }
+    }
+
+    /// The koi and the lily pads over them. A fish is every pixel near
+    /// enough its spine, as near as it's wide there, its edge shared with
+    /// the water where it only half covers a pixel; rounder for being
+    /// darker toward its sides. Its fins are see-through: one each side
+    /// behind its head, swept back, and a tail that fans out and forks.
+    fn pond(&mut self, t: f64) {
+        // How far a point is outside a stretch from a to b, as wide as ra
+        // at a and rb at b, with how far along it is, and how far out to
+        // which side, 1 at its edge. Past its ends there's none of it,
+        // unless it's `round` there.
+        let stretch = |q: (f64, f64), a: (f64, f64), b: (f64, f64), ra: f64, rb: f64, round: bool| {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let u = ((q.0 - a.0) * dx + (q.1 - a.1) * dy) / (dx * dx + dy * dy).max(1e-9);
+            if !round && !(0.0..=1.0).contains(&u) {
+                return (f64::MAX, u, 0.0);
+            }
+            let u = u.clamp(0.0, 1.0);
+            let (ox, oy) = (q.0 - a.0 - dx * u, q.1 - a.1 - dy * u);
+            let (d, r) = ((ox * ox + oy * oy).sqrt(), (ra + (rb - ra) * u).max(0.1));
+            (d - r, u, (dx * oy - dy * ox).signum() * d / r)
+        };
+        let fish = std::mem::take(&mut self.koi);
+        for k in &fish {
+            let girth: Vec<f64> = GIRTH.iter().chain(&FIN).map(|g| g * k.size).collect();
+            let body = GIRTH.len() - 1;
+            let (c1, c2, much) = COATS[k.look as usize % COATS.len()];
+            // Its side fins: from its sides out and back.
+            let (s2, s3) = (k.spine[2], k.spine[3]);
+            let (bx, by) = ((s3.0 - s2.0) / (JOINT * k.size), (s3.1 - s2.1) / (JOINT * k.size));
+            let g = girth[2];
+            let fins: Vec<((f64, f64), (f64, f64))> = [1.0, -1.0]
+                .iter()
+                .map(|sd| {
+                    let (ox, oy) = (-by * sd, bx * sd);
+                    ((s2.0 + ox * g * 0.8, s2.1 + oy * g * 0.8), (s2.0 + (ox * 1.7 + bx * 1.3) * g, s2.1 + (oy * 1.7 + by * 1.3) * g))
+                })
+                .collect();
+            let reach = g * 3.0 + 1.0;
+            let (x0, x1) = k.spine.iter().fold((f64::MAX, f64::MIN), |m, p| (m.0.min(p.0), m.1.max(p.0)));
+            let (y0, y1) = k.spine.iter().fold((f64::MAX, f64::MIN), |m, p| (m.0.min(p.1), m.1.max(p.1)));
+            for py in ((y0 - reach) / 2.0).floor().max(0.0) as usize..=(((y1 + reach) / 2.0).ceil().max(0.0) as usize).min(self.ph.saturating_sub(1)) {
+                for px in (x0 - reach).floor().max(0.0) as usize..=((x1 + reach).ceil().max(0.0) as usize).min(self.pw.saturating_sub(1)) {
+                    // Looked at in two places, upper and lower, a pixel
+                    // being tall.
+                    let (mut cover, mut sheer, mut col, mut shade) = (0.0, 0.0, c1, 0.0);
+                    for sy in [0.5, 1.5] {
+                        let q = (px as f64 + 0.5, py as f64 * 2.0 + sy);
+                        let mut best = (f64::MAX, 0.0, 0.0);
+                        for i in 0..body {
+                            let (d, u, side) = stretch(q, k.spine[i], k.spine[i + 1], girth[i], girth[i + 1], true);
+                            if d < best.0 {
+                                best = (d, (i as f64 + u) / body as f64, side);
+                            }
+                        }
+                        let c = (0.6 - best.0).clamp(0.0, 1.0);
+                        if c > 0.0 {
+                            cover += c * 0.5;
+                            // Its markings: patches along it and across.
+                            let v = (best.1 * 5.0 + k.ph * 3.0).sin() * (best.2 * 1.3 + k.ph * 5.0).cos() + 0.3 * (best.1 * 11.0 + k.ph * 7.0).sin();
+                            col = if v > much { c2 } else { c1 };
+                            shade = best.2.abs().min(1.0);
+                        }
+                        let mut fin: f64 = 0.0;
+                        for i in body..k.spine.len() - 1 {
+                            let (d, u, side) = stretch(q, k.spine[i], k.spine[i + 1], girth[i], girth[i + 1], false);
+                            // The fork: a notch up the middle of its end.
+                            let fork = i + 2 == k.spine.len() && side.abs() < 0.45 * u;
+                            if !fork {
+                                fin = fin.max((0.6 - d).clamp(0.0, 1.0));
+                            }
+                        }
+                        for &(a, b) in &fins {
+                            fin = fin.max((0.6 - stretch(q, a, b, g * 0.5, g * 0.2, true).0).clamp(0.0, 1.0));
+                        }
+                        sheer += fin * 0.5;
+                    }
+                    let p = &mut self.px[py * self.pw + px];
+                    *p = p.mix(c1.mix(c2, 0.3), sheer * 0.45);
+                    *p = p.mix(col.mix(DEEP, 0.35 * shade * shade), cover * 0.95);
+                }
+            }
+        }
+        self.koi = fish;
+        // Food, afloat, each bit bobbing, fading as it's about to go; and
+        // a ring widening where one was taken.
+        for (x, y, at) in self.food.clone() {
+            let fade = ((FLOATS_FOR - (t - at)) / 3.0).clamp(0.0, 1.0) * (0.8 + 0.2 * (t * 2.0 + x).sin());
+            self.mark(x, y / 2.0, FOOD, fade);
+        }
+        for (x, y, at) in self.rings.clone() {
+            let (age, n) = (t - at, 28);
+            for k in 0..n {
+                let a = k as f64 / n as f64 * std::f64::consts::TAU;
+                let r = 2.0 + 9.0 * age;
+                self.mark(x + r * a.cos(), (y + r * a.sin()) / 2.0, LIGHT, 0.5 * (1.0 - age));
+            }
+        }
+        for &(x, y, r, notch) in &self.pads.clone() {
+            // Each rides the water a little, in its own time.
+            let (x, y) = (x + 0.8 * (t * 0.21 + notch).sin(), y + 0.8 * (t * 0.17 + notch * 2.0).cos());
+            for py in ((y - r) / 2.0).floor().max(0.0) as usize..=(((y + r) / 2.0).ceil().max(0.0) as usize).min(self.ph.saturating_sub(1)) {
+                for px in (x - r).floor().max(0.0) as usize..=((x + r).ceil().max(0.0) as usize).min(self.pw.saturating_sub(1)) {
+                    let mut cover = 0.0;
+                    let mut rim = 0.0;
+                    for sy in [0.5, 1.5] {
+                        let (dx, dy) = (px as f64 + 0.5 - x, py as f64 * 2.0 + sy - y);
+                        let d = (dx * dx + dy * dy).sqrt();
+                        // The notch: a wedge cut in to near the middle.
+                        if d > r * 0.25 && veer(notch, dy.atan2(dx)).abs() < 0.3 {
+                            continue;
+                        }
+                        cover += (r - d + 0.5).clamp(0.0, 1.0) * 0.5;
+                        rim += if d > r - 1.2 { 0.5 } else { 0.0 };
+                    }
+                    let p = &mut self.px[py * self.pw + px];
+                    *p = p.mix(PAD.mix(DEEP, 0.35 * rim), cover * 0.9);
+                }
             }
         }
     }
@@ -579,12 +1051,23 @@ impl Sky {
         let mut threats: Vec<(f64, f64)> = self.hawks.iter().map(|m| (m.x, m.y)).collect();
         threats.extend(self.pointer.filter(|p| self.t - p.2 < 2.0).map(|p| (p.0, p.1)));
         let hawk = !threats.is_empty();
+        let (cols, text) = (self.pw / 2, &self.text);
+        let on_text = |x: f64, y: f64| x >= 0.0 && y >= 0.0 && x < w && y < h && text.get(y as usize / 2 * cols + x as usize / 2).is_some_and(|t| *t);
         for (i, m) in self.motes.iter_mut().enumerate() {
+            // Perched: still, till it's had enough, something comes at it,
+            // or the text it's on goes.
+            if m.life.is_finite() {
+                let scared = threats.iter().any(|&(px, py)| ((m.x - px).powi(2) + ((m.y - py) * 2.0).powi(2)).sqrt() < 14.0);
+                if m.age > m.life || scared || !on_text(m.x, m.y + 1.0) {
+                    (m.vx, m.vy, m.life, m.age) = (9.0 * (m.ph * 7.0 + m.x).cos(), -5.0, f64::INFINITY, 0.0);
+                }
+                continue;
+            }
             let (mut cx, mut cy, mut ax, mut ay, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             for (j, o) in all.iter().enumerate() {
                 let (dx, dy) = (o.x - m.x, (o.y - m.y) * 2.0);
                 let d = (dx * dx + dy * dy).sqrt();
-                if i == j || d > 16.0 {
+                if i == j || d > 16.0 || o.life.is_finite() {
                     continue;
                 }
                 (cx, cy, ax, ay, n) = (cx + dx, cy + dy, ax + o.vx, ay + o.vy, n + 1.0);
@@ -606,6 +1089,15 @@ impl Sky {
                     m.vy += dy / 2.0 * push * dt;
                     fleeing = true;
                 }
+            }
+            // Just over a line, and nothing after it: now and then it
+            // lands, for a few seconds.
+            let ledge = [0.0, 2.0].into_iter().find(|d| !on_text(m.x, m.y + d) && on_text(m.x, m.y + d + 2.0));
+            if let Some(d) = ledge.filter(|_| !fleeing && m.age > 5.0)
+                && self.rng.below(1000) < (dt * 500.0) as i32
+            {
+                (m.vx, m.vy, m.y, m.life, m.age) = (0.0, 0.0, ((m.y + d) / 2.0).floor() * 2.0 + 1.0, 3.0 + m.ph, 0.0);
+                continue;
             }
             // Text ahead: turn to the left of the way it's going.
             let (fx, fy) = (m.x + m.vx * 0.6, m.y + m.vy * 0.6);
@@ -718,15 +1210,20 @@ impl Sky {
         }
     }
 
-    fn dot(&mut self, x: f64, y: f64, c: Rgb, a: f64) {
+    /// A pixel lit, whatever's near it.
+    fn mark(&mut self, x: f64, y: f64, c: Rgb, a: f64) {
         let (x, y) = (x.round(), y.round());
         if x < 0.0 || y < 0.0 || x >= self.pw as f64 || y >= self.ph as f64 || a <= 0.0 {
             return;
         }
-        let (x, y) = (x as usize, y as usize);
-        let hushed = self.quiet.get(y / 2 * (self.pw / 2) + x / 2).is_some_and(|q| *q);
-        let p = &mut self.px[y * self.pw + x];
-        *p = p.mix(c, a.min(1.0) * if hushed { 0.12 } else { 1.0 });
+        let p = &mut self.px[y as usize * self.pw + x as usize];
+        *p = p.mix(c, a.min(1.0));
+    }
+
+    /// A pixel lit, faint near text.
+    fn dot(&mut self, x: f64, y: f64, c: Rgb, a: f64) {
+        let hushed = x.round() >= 0.0 && y.round() >= 0.0 && self.quiet.get(y.round() as usize / 2 * (self.pw / 2) + x.round() as usize / 2).is_some_and(|q| *q);
+        self.mark(x, y, c, a.min(1.0) * if hushed { 0.12 } else { 1.0 });
     }
 
     fn draw(&mut self, t: f64, th: &Theme) {
@@ -751,6 +1248,11 @@ impl Sky {
                     // A head and a fainter tail behind it.
                     let v = (m.vx * m.vx + m.vy * m.vy * 4.0).sqrt().max(1.0);
                     let c = if m.tint < 2 { th.accent } else { th.fg };
+                    if m.life.is_finite() {
+                        // Perched, on the text's edge, where the rest go faint.
+                        self.mark(m.x, m.y, c, m.a);
+                        continue;
+                    }
                     self.dot(m.x, m.y, c, m.a);
                     self.dot(m.x - 1.5 * m.vx / v, m.y - 0.75 * m.vy / v * 2.0, c, m.a * 0.4);
                 }
@@ -771,6 +1273,33 @@ impl Sky {
             }
         }
         self.motes = motes;
+        match self.kind {
+            Kind::Snow => {
+                // Settled, fading as it melts, in a few steps.
+                for i in 0..self.drift.len() {
+                    let lit = ((self.drift[i] * 4.0).min(1.0) * 4.0).round() / 4.0;
+                    if lit > 0.0 {
+                        self.px[i] = self.px[i].mix(th.fg, 0.7 * lit);
+                    }
+                }
+            }
+            Kind::Sand => {
+                for i in 0..self.cells.len() {
+                    if self.cells[i] {
+                        // Grains a little unlike each other, by where they are.
+                        let (x, y) = (i % self.pw, i / self.pw);
+                        self.mark(x as f64, y as f64, th.warm, [0.5, 0.62, 0.42][(x * 7 + y * 13) % 3]);
+                    }
+                }
+            }
+            Kind::Koi => self.pond(t),
+            Kind::Ants => {
+                if let Some(a) = &self.ants {
+                    a.draw(&mut self.px, t, th);
+                }
+            }
+            _ => {}
+        }
         // Hawks: a head a whole block, a longer tail, in the warm color.
         for m in self.hawks.clone() {
             let v = (m.vx * m.vx + m.vy * m.vy * 4.0).sqrt().max(1.0);
@@ -886,10 +1415,103 @@ mod tests {
         assert!(at(&s).is_none() && s.floats.is_empty());
     }
 
+    /// A sky 60x20 with a line of text across row 10, run for `secs`.
+    fn over_a_line(kind: Kind, many: [Option<usize>; 2], secs: usize) -> Sky {
+        let th = Theme::default();
+        let mut s = Sky::new(kind, false, 60, 20, 7);
+        s.crowd(many);
+        let mut front = vec![None; 60 * 20];
+        front[10 * 60 + 10..10 * 60 + 50].fill(Some(Cell { ch: 'x', st: Style::default() }));
+        for f in 0..secs * 30 {
+            s.frame(f as f64 / 30.0, &th, &front, 60);
+        }
+        s
+    }
+
+    #[test]
+    fn as_many_as_it_says() {
+        assert_eq!((Kind::from("boids 12 3"), many("boids 12 3"), many("rain")), (Kind::Boids, [Some(12), Some(3)], [None, None]));
+        assert_eq!((Kind::from("ants ground fire 80"), many("ants ground fire 80"), said("ants ground fire 80").as_str()), (Kind::Ants, [Some(80), None], "ground fire"));
+        let mut s = Sky::new(Kind::Boids, false, 60, 20, 3);
+        assert_eq!(s.hawks.len(), 2);
+        s.crowd([Some(12), Some(3)]);
+        assert_eq!((s.motes.len(), s.hawks.len()), (12, 3));
+        s.crowd([Some(5), None]);
+        assert_eq!((s.motes.len(), s.hawks.len()), (5, 2));
+        let mut s = Sky::new(Kind::Koi, false, 60, 20, 3);
+        s.crowd([Some(4), None]);
+        assert_eq!((s.koi.len(), s.motes.len()), (4, 0));
+    }
+
+    #[test]
+    fn snow_lies_on_text_and_birds_perch_on_it() {
+        // Settled just over the line, nowhere else.
+        let s = over_a_line(Kind::Snow, [None; 2], 40);
+        let lying: Vec<usize> = (0..s.drift.len()).filter(|&i| s.drift[i] > 0.0).collect();
+        assert!(lying.len() > 10, "{}", lying.len());
+        assert!(lying.iter().all(|i| matches!(i / s.pw, 18 | 19) && (20..100).contains(&(i % s.pw))));
+        // With no hawks about, some bird's sat on it, on the row over it.
+        let mut s = over_a_line(Kind::Boids, [Some(80), Some(0)], 0);
+        let (th, mut front) = (Theme::default(), vec![None; 60 * 20]);
+        front[10 * 60 + 10..10 * 60 + 50].fill(Some(Cell { ch: 'x', st: Style::default() }));
+        let mut sat = 0;
+        for f in 0..900 {
+            s.frame(f as f64 / 30.0, &th, &front, 60);
+            let perched: Vec<&Mote> = s.motes.iter().filter(|m| m.life.is_finite()).collect();
+            assert!(perched.iter().all(|m| m.y == 19.0 && (20.0..100.0).contains(&m.x)));
+            sat = sat.max(perched.len());
+        }
+        assert!((1..40).contains(&sat), "{sat}");
+        // The line gone, they're off.
+        s.frame(30.1, &th, &vec![None; 60 * 20], 60);
+        assert!(s.motes.iter().all(|m| !m.life.is_finite()));
+    }
+
+    #[test]
+    fn sand_heaps_and_runs_out() {
+        let s = over_a_line(Kind::Sand, [None; 2], 6);
+        let grains = |s: &Sky| s.cells.iter().filter(|c| **c).count();
+        // Some on the floor, some on the line, none in it.
+        assert!(s.cells[39 * s.pw..].iter().any(|c| *c));
+        assert!((20..100).any(|x| s.cells[19 * s.pw + x]));
+        assert!((20..100).all(|x| !s.cells[20 * s.pw + x]));
+        // Never deeper than it's let get.
+        let s = over_a_line(Kind::Sand, [None; 2], 240);
+        assert!(grains(&s) <= s.pw * s.ph / 7 + 3, "{}", grains(&s));
+    }
+
+    #[test]
+    fn koi_keep_their_shape_and_stay_about() {
+        let s = over_a_line(Kind::Koi, [Some(5), None], 120);
+        for k in &s.koi {
+            // In or near the pond, every joint as far from the last as ever.
+            assert!((-40.0..160.0).contains(&k.x) && (-40.0..120.0).contains(&k.y), "{} {}", k.x, k.y);
+            for w in k.spine.windows(2) {
+                let d = ((w[0].0 - w[1].0).powi(2) + (w[0].1 - w[1].1).powi(2)).sqrt();
+                assert!((d - JOINT * k.size).abs() < 1e-6);
+            }
+        }
+        // Drawn: somewhere a pixel's nearer a koi's color than the water's.
+        let th = Theme::default();
+        let water = th.bg.mix(DEEP, 0.45);
+        assert!(s.px.iter().any(|p| far(*p, water) > 150));
+        // Fed with a click: six bits on the water, and in a while all eaten.
+        let mut s = s;
+        let front = vec![None; 60 * 20];
+        s.ripples.push((60.0, 12.0, 120.0));
+        s.frame(120.0, &th, &front, 60);
+        // (One may be under a fish's nose already.)
+        assert!((4..=6).contains(&s.food.len()));
+        for f in 0..25 * 30 {
+            s.frame(120.0 + f as f64 / 30.0, &th, &front, 60);
+        }
+        assert!(s.food.is_empty(), "{} left", s.food.len());
+    }
+
     #[test]
     fn every_kind_runs() {
         let th = Theme::default();
-        for k in [Kind::Stars, Kind::Snow, Kind::Rain, Kind::Embers, Kind::Life] {
+        for k in [Kind::Stars, Kind::Snow, Kind::Rain, Kind::Embers, Kind::Life, Kind::Boids, Kind::Fireflies, Kind::Sand, Kind::Koi, Kind::Ants] {
             let mut s = Sky::new(k, true, 40, 12, 3);
             let mut front = vec![None; 40 * 12];
             front[5 * 40 + 20] = Some(Cell { ch: '█', st: Style::fg(th.accent) });

@@ -1,8 +1,10 @@
 //! A ```lang run block, run on its step in the talk's folder, its output
 //! streamed in under the slide as it comes. A key stops it, and is then
-//! taken as it would have been.
+//! taken as it would have been. Run again by --loop, what it printed last
+//! time stays up till it's done, then turns into what it printed this time.
 
 use crate::markup::{self, Cell, Line, Style};
+use crate::morph::{self, Part, Role};
 use crate::render;
 use crate::screen::Screen;
 use crate::talk::Talk;
@@ -12,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq)]
 pub struct Output {
     pub lines: Vec<String>,
     /// How it ended, when that's worth saying: a failure, or stopped.
@@ -49,10 +51,10 @@ fn clean(raw: &str) -> String {
     out
 }
 
-/// The output under slide n, as much of its end as fits, a bar beside it:
-/// the accent color while it runs.
-pub fn show(s: &mut Screen, talk: &Talk, n: usize, out: &Output, running: bool) {
-    let Some((top, col)) = render::under(s, &talk.slides[n]) else { return };
+/// The output's rows under slide n, as much of its end as fits, and where
+/// they go: the first's row, and their column.
+fn rows(s: &Screen, talk: &Talk, n: usize, out: &Output, running: bool) -> Option<(i32, i32, Vec<Line>)> {
+    let (top, col) = render::under(s, &talk.slides[n])?;
     let bottom = s.h - 2;
     let mut rows: Vec<Line> = out.lines.iter().map(|l| markup::plain(l, Style::default())).collect();
     if let Some(e) = &out.end {
@@ -62,14 +64,21 @@ pub fn show(s: &mut Screen, talk: &Talk, n: usize, out: &Output, running: bool) 
         rows.push(markup::plain("(no output)", s.muted()));
     }
     let fit = (bottom - top + 1).max(0) as usize;
-    let rows = &rows[rows.len().saturating_sub(fit)..];
+    let room = (s.w - col + 1).max(0) as usize;
+    let rows = rows[rows.len().saturating_sub(fit)..].iter().map(|l| l[..l.len().min(room)].to_vec()).collect();
+    Some((top, col, rows))
+}
+
+/// The output under slide n, a bar beside it: the accent color while it
+/// runs.
+pub fn show(s: &mut Screen, talk: &Talk, n: usize, out: &Output, running: bool) {
+    let Some((top, col, rows)) = rows(s, talk, n, out, running) else { return };
     let bar = Cell { ch: '▎', st: if running { s.accent() } else { s.muted() } };
     for (i, l) in rows.iter().enumerate() {
         let r = top + i as i32;
         s.clear_row(r);
         s.put(r, col - 2, &[bar]);
-        let room = (s.w - col + 1).max(0) as usize;
-        s.put(r, col, &l[..l.len().min(room)]);
+        s.put(r, col, l);
     }
     if running && rows.is_empty() {
         s.clear_row(top);
@@ -77,8 +86,32 @@ pub fn show(s: &mut Screen, talk: &Talk, n: usize, out: &Output, running: bool) 
     }
 }
 
-/// Slide n's block run, its output drawn as it comes.
-pub fn go(s: &mut Screen, talk: &Talk, n: usize) -> Output {
+/// What slide n's block printed before turning into what it printed now:
+/// lines in both swing to their new places, the rest fade out and in, the
+/// slide over them left as it is.
+fn turn(s: &mut Screen, talk: &Talk, n: usize, was: &Output, now: &Output) {
+    let (Some((top, col, a)), Some((_, _, b))) = (rows(s, talk, n, was, false), rows(s, talk, n, now, false)) else { return };
+    let slide = render::fixed(s, talk, n, talk.slides[n].steps());
+    let bar = vec![Cell { ch: '▎', st: s.muted() }];
+    let parts = |rows: Vec<Line>| -> Vec<Part> {
+        let mut p = slide.clone();
+        for (i, l) in rows.into_iter().enumerate() {
+            p.push((top + i as i32, col - 2, bar.clone(), Role::Still));
+            p.push((top + i as i32, col, l, Role::Moves));
+        }
+        p
+    };
+    // Rows it no longer has, emptied first: the morph only clears near
+    // what moves.
+    for r in top + b.len() as i32..top + a.len() as i32 {
+        s.clear_row(r);
+    }
+    morph::play(s, &parts(a), &parts(b));
+}
+
+/// Slide n's block run, its output drawn as it comes; or, with what it
+/// printed last time, that left up while it runs, then turned into this.
+pub fn go(s: &mut Screen, talk: &Talk, n: usize, prev: Option<&Output>) -> Output {
     let run = talk.slides[n].run.as_ref().expect("a slide that runs");
     let mut out = Output::default();
     let mut cmd = Command::new(&run.argv[0]);
@@ -110,7 +143,7 @@ pub fn go(s: &mut Screen, talk: &Talk, n: usize) -> Output {
         });
     }
     drop(tx);
-    show(s, talk, n, &out, true);
+    show(s, talk, n, prev.unwrap_or(&out), true);
     s.flush();
     let mut last = Instant::now();
     let mut stopped = false;
@@ -145,8 +178,10 @@ pub fn go(s: &mut Screen, talk: &Talk, n: usize) -> Output {
                 s.tick(last.elapsed().as_secs_f64());
                 last = Instant::now();
             }
-            show(s, talk, n, &out, true);
-            s.flush();
+            if prev.is_none() {
+                show(s, talk, n, &out, true);
+                s.flush();
+            }
         }
     }
     if stopped {
@@ -165,6 +200,9 @@ pub fn go(s: &mut Screen, talk: &Talk, n: usize) -> Output {
     }
     if s.rec.is_some() {
         s.tick(last.elapsed().as_secs_f64());
+    }
+    if let Some(was) = prev.filter(|p| **p != out && !talk.calm && !stopped) {
+        turn(s, talk, n, was, &out);
     }
     show(s, talk, n, &out, false);
     s.flush();

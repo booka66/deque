@@ -30,9 +30,13 @@ pub fn label(s: &Screen, slide: &Slide, n: usize) -> Option<Line> {
 }
 
 /// The screen empty but for the slides' dots along the bottom, or, when
-/// they wouldn't fit, a bar as far along as the talk is.
+/// they wouldn't fit, a bar as far along as the talk is. A talk of one
+/// slide has nowhere to be along, and no dot.
 pub fn clear(s: &mut Screen, talk: &Talk, n: usize) {
     s.clear();
+    if talk.slides.len() == 1 {
+        return;
+    }
     let (acc, mut_) = (s.accent(), s.muted());
     let total = talk.slides.len() as i32;
     if total * 2 + 3 > s.w {
@@ -58,8 +62,8 @@ pub fn draw(s: &mut Screen, talk: &Talk, pics: &mut Pictures, n: usize, mode: Mo
     let slide = &talk.slides[n];
     // Pictures are drawn by the terminal, over whatever a sky would do.
     match slide.images.is_empty() {
-        true => s.backdrop(Kind::from(&talk.sky(slide)), talk.glow(slide)),
-        false => s.backdrop(Kind::None, false),
+        true => backdrop(s, talk, slide),
+        false => s.backdrop(Kind::None, false, [None; 2], ""),
     }
     if !slide.images.is_empty() {
         pictures(s, talk, pics, n);
@@ -73,6 +77,12 @@ pub fn draw(s: &mut Screen, talk: &Talk, pics: &mut Pictures, n: usize, mode: Mo
         let st = s.muted();
         s.put_str(s.h, 2, "+ − size", st);
     }
+}
+
+/// The sky a slide asks for: its sort, how many, and what else it says.
+fn backdrop(s: &mut Screen, talk: &Talk, slide: &Slide) {
+    let sky = talk.sky(slide);
+    s.backdrop(Kind::from(&sky), talk.glow(slide), crate::sky::many(&sky), &crate::sky::said(&sky));
 }
 
 /// Where a text slide's parts go: its label's row, its headline's, its
@@ -114,6 +124,40 @@ fn placed(s: &Screen, talk: &Talk, n: usize, shown: usize, whole: bool) -> Vec<P
     out
 }
 
+/// Slide n as it is, every part of it staying where it is: what a morph
+/// of something else on the screen leaves alone, and puts back.
+pub fn fixed(s: &Screen, talk: &Talk, n: usize, shown: usize) -> Vec<Part> {
+    let slide = &talk.slides[n];
+    if !slide.images.is_empty() || slide.draw.is_some() {
+        return vec![];
+    }
+    placed(s, talk, n, shown, false).into_iter().map(|(r, c, l, _)| (r, c, l, Role::Still)).collect()
+}
+
+/// Slide n of a talk read again, `old` as it was: what's changed on it
+/// swings to its new place, a headline's blocks to the new headline, and
+/// the rest stays put. Whether anything had changed, and so the slide
+/// wants drawing as it now is.
+pub fn retell(s: &mut Screen, old: &Talk, talk: &Talk, n: usize, shown: usize) -> bool {
+    let (was, slide) = (&old.slides[n], &talk.slides[n]);
+    let text = |x: &Slide| x.images.is_empty() && x.draw.is_none();
+    if !text(was) || !text(slide) || talk.calm {
+        return format!("{was:?}") != format!("{slide:?}");
+    }
+    let (mut a, mut b) = (placed(s, old, n, shown, true), placed(s, talk, n, shown, true));
+    if a == b {
+        // Nothing to see but, maybe, how many are in its sky.
+        backdrop(s, talk, slide);
+        return false;
+    }
+    for p in b.iter_mut().filter(|p| a.contains(&**p)) {
+        p.3 = Role::Still;
+    }
+    a.retain(|p| !b.iter().any(|q| q.3 == Role::Still && (q.0, q.1, &q.2) == (p.0, p.1, &p.2)));
+    morph::play(s, &a, &b);
+    true
+}
+
 /// How slide n arrives from the one before it: its code turning into
 /// n's, when both have code, or played in.
 pub fn arrive(talk: &Talk, n: usize) -> Mode {
@@ -147,7 +191,21 @@ fn lit(slide: &Slide, i: usize, shown: usize) -> f64 {
 fn body_line(s: &Screen, slide: &Slide, i: usize, shown: usize) -> Line {
     let k = lit(slide, i, shown);
     let l = &slide.body[i].line;
+    if let Some(st) = answered(s, slide, i, shown) {
+        return l.iter().map(|c| Cell { ch: c.ch, st }).collect();
+    }
     if k < 1.0 { crate::fine::faded(l, k, s.theme.bg, s.theme.fg) } else { l.clone() }
+}
+
+/// What body line i is drawn in once its poll's answer is out: the answer
+/// lit, the other choices dim. None before then, or outside a poll.
+fn answered(s: &Screen, slide: &Slide, i: usize, shown: usize) -> Option<Style> {
+    let p = slide.poll.as_ref()?;
+    let (k, step) = p.answer?;
+    if shown < step || !(p.at..p.at + p.choices.len()).contains(&i) {
+        return None;
+    }
+    Some(if i == p.at + k { Style { fg: Some(s.theme.good), bg: None, bold: true } } else { s.muted() })
 }
 
 fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
@@ -181,6 +239,18 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
             }
             return;
         }
+        // A poll's answer: the other choices go dim, then it's lit.
+        if let Some(p) = slide.poll.as_ref().filter(|p| p.answer.is_some_and(|a| a.1 == shown)) {
+            let rows = p.at..p.at + p.choices.len();
+            for i in rows.clone().filter(|&i| Some(i - p.at) != p.answer.map(|a| a.0)) {
+                s.center(brow + i as i32, &body_line(s, slide, i, shown));
+            }
+            s.tick(if talk.calm { 0.0 } else { 0.35 });
+            for i in rows {
+                s.center(brow + i as i32, &body_line(s, slide, i, shown));
+            }
+            return;
+        }
         if let Some((i, b)) = slide.body.iter().enumerate().find(|(_, b)| b.step == shown) {
             let row = brow + i as i32;
             s.clear_row(row);
@@ -206,8 +276,14 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
             }
         }
         let how = talk.lines(slide);
-        for (i, b) in slide.body.iter().enumerate().filter(|(_, b)| seen(b) && b.bar.is_none()) {
-            fx::line_in(s, &how, brow + i as i32, &b.line);
+        let lines = slide.body.iter().enumerate().filter(|(_, b)| seen(b) && b.bar.is_none());
+        if how == "scramble" {
+            let all: Vec<(i32, &crate::markup::Line)> = lines.map(|(i, b)| (brow + i as i32, &b.line)).collect();
+            fx::lines_scramble(s, &all);
+        } else {
+            for (i, b) in lines {
+                fx::line_in(s, &how, brow + i as i32, &b.line);
+            }
         }
         // A chart's bars, growing together, to an eighth of a cell.
         let bars: Vec<(usize, &crate::talk::Bar)> = slide.body.iter().enumerate().filter_map(|(i, b)| Some((i, b.bar.as_ref()?))).collect();
@@ -256,7 +332,7 @@ fn text(s: &mut Screen, talk: &Talk, n: usize, mode: Mode, shown: usize) {
 
 /// Slide n's poll bars moving from how full they were, `before`, to how
 /// full they are now.
-pub fn tallied(s: &mut Screen, talk: &Talk, n: usize, before: &[f64]) {
+pub fn tallied(s: &mut Screen, talk: &Talk, n: usize, before: &[f64], shown: usize) {
     let slide = &talk.slides[n];
     let Some(p) = &slide.poll else { return };
     let (.., brow) = layout(s, slide);
@@ -268,7 +344,11 @@ pub fn tallied(s: &mut Screen, talk: &Talk, n: usize, before: &[f64]) {
             let Some(bar) = &slide.body[i].bar else { continue };
             let was = before.get(k).copied().unwrap_or(bar.frac);
             let b = crate::talk::Bar { frac: was + (bar.frac - was) * e, ..bar.clone() };
-            s.center(brow + i as i32, &b.line(1.0, s.accent()));
+            let mut l = b.line(1.0, s.accent());
+            if let Some(st) = answered(s, slide, i, shown) {
+                l.iter_mut().for_each(|c| c.st = st);
+            }
+            s.center(brow + i as i32, &l);
         }
         if f < frames {
             s.tick(0.02);
@@ -563,6 +643,12 @@ pub fn leave(s: &mut Screen, talk: &Talk, from: usize, n: usize) -> bool {
             crate::life::play(s, &cells);
             false
         }
+        "sand" => {
+            still(s, talk, from);
+            let cells = s.cells().to_vec();
+            crate::sand::play(s, &cells);
+            false
+        }
         "focus" => pull(s, talk, from, n),
         t => {
             fx::transition(s, t);
@@ -791,6 +877,7 @@ pub fn help(s: &mut Screen, talk: &Talk, n: usize) {
         ("r", "play the slide again"),
         ("enter", "run the slide's command"),
         ("B .", "blank the screen"),
+        ("v", "sky: ants from above, or from the side"),
         ("w P", "how to watch, your remote (--share)"),
         ("+ −", "the font's size (--tv)"),
         ("q q", "quit"),

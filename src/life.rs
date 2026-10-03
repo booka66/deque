@@ -10,7 +10,7 @@ use crate::sky::{QUAD, quad};
 /// Which of a cell's four pixels a letter lights: a block, the ones it
 /// fills; anything else, a pattern of two or three picked by the letter, so
 /// the same word seeds the same way each time.
-fn seed(ch: char) -> u32 {
+pub fn seed(ch: char) -> u32 {
     if let Some(m) = QUAD.iter().position(|&q| q == ch) {
         return m as u32;
     }

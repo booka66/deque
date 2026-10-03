@@ -49,7 +49,7 @@ fn play(talk: &Talk, w: i32, h: i32) -> Played {
             mark(&mut s);
             render::draw(&mut s, talk, &mut pics, n, Mode::Step, k, false);
             if slide.run.as_ref().is_some_and(|r| r.step == k) {
-                run::go(&mut s, talk, n);
+                run::go(&mut s, talk, n, None);
             }
             s.tick(STEP);
         }

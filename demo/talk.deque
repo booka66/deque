@@ -387,6 +387,58 @@ sky: fireflies
 a few warm lights, now and then lit
 
 ---
+sky: koi
+
+## skies · koi
+# POND
+`sky: koi`
+
+click to feed them
+
+---
+sky: ants
+
+## skies · ants
+`sky: ants`: they dig it as you watch · click to feed them
+
+---
+sky: ants ground fire sand
+
+## skies · ants, from above
+# TRAILS
+`sky: ants ground fire sand`
+
+---
+sky: sand
+
+## skies · sand
+# SAND
+`sky: sand`
+
+it heaps on the words, and runs out when it's deep
+
+---
+sky: boids ${sh: echo 9} 1
+
+## skies · counted
+# COUNT
+`sky: boids $${sh: echo 9} 1`
+
+nine birds and a hawk: a number can be what a command prints
+
+{muted}`sky: boids $${sh: gh issue list | wc -l}` is a bird a task{/}
+{muted}`# $${sh: date +%H:%M}` is a clock{/}
+
+---
+tr: sand
+
+## transitions · sand
+# DUST
+`tr: sand`
+
+the slide before crumbled, heaped, and ran out
+
+---
 tr: life
 
 ## transitions · life

@@ -1,0 +1,11 @@
+#!/usr/bin/env deque
+// An ant farm and nothing else: a screensaver. Run it: deque demo/antfarm.deque
+//
+// v is the same colony from above. A click drops food. q q quits.
+// Change the line under the --- for other ants: after `sky: ants` go any of
+//   farm, ground · leafcutter, black, fire · soil, sand, gel · how many
+// as in `sky: ants fire sand 90`.
+cursor: off
+
+---
+sky: ants

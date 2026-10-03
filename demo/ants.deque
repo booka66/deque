@@ -1,0 +1,129 @@
+#!/usr/bin/env deque
+// sky: ants, every way it can be kept, each slide showing the line that
+// made it. Run it: deque demo/ants.deque, or leave it going by itself:
+// deque demo/ants.deque --loop
+//
+// It's one colony seen two ways: slides that say the same ants in the same
+// soil share it, from the side or from above, and going back to it finds it
+// as it was left. v goes from one view to the other.
+
+---
+fx: assemble
+sky: ants ground
+time: 20s
+
+# ANTS
+`sky: ants`
+
+{muted}a colony behind your slides · click to feed it · v for the other view{/}
+
+---
+sky: ants
+time: 45s
+
+## the farm
+`sky: ants`
+
+{muted}the nest from the side · they dig it as you watch{/}
+
+---
+sky: ants
+time: 45s
+
+## who's who
+```
+{accent}the mound{/}     every grain dug, carried up and dropped by the door
+{accent}the store{/}     first chamber down: leaf, turned to fungus
+{accent}the nursery{/}   eggs, then larvae, then pupae; new ants come out pale
+{accent}the midden{/}    where the dead are carried
+{accent}the queen{/}     at the bottom, laying while there's food
+```
+
+---
+sky: ants
+time: 30s
+
+## feed them
+`click` anywhere: food falls, and a forager comes for it
+
+{muted}leafcutters cut their own too, up the plants; the leaves grow back{/}
+
+---
+sky: ants black sand
+time: 40s
+
+## black garden ants, in sand
+`sky: ants black sand`
+
+{muted}they cut nothing: they take what falls on the ground{/}
+
+---
+sky: ants fire gel
+time: 40s
+
+## fire ants, in gel
+`sky: ants fire gel`
+
+{muted}red, quick, and half as many again{/}
+
+---
+sky: ants leafcutter soil 12
+time: 30s
+
+## a young colony
+`sky: ants 12`
+
+{muted}the number is how many workers at most; the queen lays up to it{/}
+
+---
+sky: ants 120
+time: 40s
+
+## a big one
+`sky: ants 120`
+
+---
+tr: sand
+sky: ants ground
+time: 45s
+
+## from above
+# TRAILS
+`sky: ants ground`
+
+{muted}the same colony, those that are out · trails form, round the words{/}
+
+---
+sky: ants ground
+time: 30s
+
+## feed them here too
+# CLICK
+a click is a pile of leaf: watch a trail form to it, and fade when it's gone
+
+---
+sky: ants ground fire sand 150
+time: 45s
+
+## fire ants, from above
+# SWARM
+`sky: ants ground fire sand 150`
+
+---
+sky: ants ground black gel 30
+time: 40s
+
+## a few black ants
+# SCOUTS
+`sky: ants ground black gel 30`
+
+{muted}fed, the nest sends out more{/}
+
+---
+sky: ants
+time: 60s
+
+## leave it on
+`deque demo/ants.deque --loop`
+
+{muted}it goes round by itself: a farm for a screen left on{/}

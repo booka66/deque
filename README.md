@@ -25,6 +25,7 @@ deque TALK --cast F   record it played through, as an asciinema cast
 deque TALK --html F   the same, as one page to post after the talk
 deque TALK --share    stream it live, a link for anyone who can't see; they can react and vote
 deque TALK --rehearse a practice run: each slide's time written into the talk
+deque TALK --loop     it goes on by itself, round and round: for a screen left on
 deque notes TALK      speaker notes and timer; drives the talk
 deque check TALK      report problems, and slides cut off at 80x24 (--size WxH)
 deque lsp             language server
@@ -34,7 +35,7 @@ TALK can be a folder with a `talk.deque` in it, or left out when the folder you'
 
 The mouse is a laser pointer: a red dot with a glow that lights the text under it, a ring where you click, fading when it's still. The terminal's own arrow is hidden where it lets deque.
 
-Keys: `→` `space` `n` next · `←` `b` back · `12⏎` go to 12 · `'` back to where you jumped from · `o` overview (`/` finds a slide by its words or notes) · `r` replay · `B` or `.` blank to the sky, any key back · `?` every key · `q` `q` quit (one `q` could be a slip; `ctrl-c` quits at once)
+Keys: `→` `space` `n` next · `←` `b` back · `12⏎` go to 12 · `'` back to where you jumped from · `o` overview (`/` finds a slide by its words or notes) · `r` replay · `B` or `.` blank to the sky, any key back · `v` an ant colony's other view · `?` every key · `q` `q` quit (one `q` could be a slip; `ctrl-c` quits at once)
 
 Saving the talk reloads it. Starting again, `'` goes back to the slide you left off on. When the window's too small for a slide, deque says so over it rather than cutting it off. `deque demo/talk.deque` shows every feature.
 
@@ -79,14 +80,14 @@ caption
 | ```` ```ts src/a.ts#fee ```` | code from a file: `path`, `path:10-24`, or `path#name` (that function) |
 | ```` ```ts src/a.ts#fee@HEAD~2 ```` | the same, as it was at a revision in git |
 | ```` ```ts focus: 2\|4-5 ```` | on each step, those lines lit, the rest dim |
-| ```` ```chart ```` | lines of `label value`: bars that grow in |
+| ```` ```chart ```` | lines of `label value`: bars that grow in; a value can be a `${ENV}` |
 | ```` ```graph ```` | lines of `a -> b -> c`: boxes and arrows, laid out for you |
-| ```` ```poll ```` | a choice a line: with `--share`, watchers vote and the bars grow as they do |
+| ```` ```poll ```` | a choice a line: with `--share`, watchers vote and the bars grow as they do; a `* choice` is the answer, lit on the next step |
 | `\| a \| b \|` | a table; a `\|---\|` row under the first makes it a header |
 | `![label](file)` | picture; side by side on one line |
 | `// text` | speaker note |
 
-Inline: `**bold**` `` `code` `` `{accent}…{/}` `${ENV}`
+Inline: `**bold**` `` `code` `` `{accent}…{/}` `${ENV}` `${sh: command}`
 
 | option | values |
 |---|---|
@@ -94,18 +95,23 @@ Inline: `**bold**` `` `code` `` `{accent}…{/}` `${ENV}`
 | `lines:` | `type` `glide` `fade` `scramble` `count` `none` |
 | `reveal:` | same as `lines:` |
 | `then:` | `shine` `pulse` `shake` `rainbow` `sparkle` `confetti` |
-| `tr:` | `dissolve` `sweep` `curtain` `morph` `life` `focus` `none` |
-| `sky:` | `stars` `snow` `rain` `embers` `life` `boids` `fireflies` `none` |
+| `tr:` | `dissolve` `sweep` `curtain` `morph` `life` `sand` `focus` `none` |
+| `sky:` | `stars` `snow` `rain` `embers` `life` `boids` `fireflies` `sand` `koi` `ants` `none`; a number after it is how many |
 | `glow:` | `on` `off`: the headline lights what's around it |
 | `enter:` | command to run on enter |
 | `play:` | a recording (`.cast`) to play on enter instead |
 | `cols:` | columns while `enter:` runs, with `--tv` |
+| `keys:` | `on` `off`: while `enter:` runs, the keys you press on a row under it |
 | `draw:` | `WxH` canvas: `text` `center` `box` `arrow` `dotted` `clear` `step` |
-| `time:` | how long it's meant to be up (`90s`, `2m`); `deque notes` shows if you're ahead or behind |
+| `time:` | how long it's meant to be up (`90s`, `2m`); `deque notes` shows if you're ahead or behind, and `--loop` keeps it up that long |
 
 Code in the same language on slides in a row morphs: what's in both swings to its new place, the rest fades. A slide's own `tr:` turns that off. `tr: morph` does it to the whole slide: every word, and the headline's blocks flocking into the new headline.
 
 `play: demo.cast` plays a demo recorded beforehand (`asciinema rec demo.cast`) on enter, so it can't go wrong on the day: as it was recorded, long pauses cut short. It stops at the recording's markers (its `[time, "m", ""]` lines) for you to talk over; space pauses and goes on, `→` skips to the next marker, `q` stops. With an `enter:` too, enter cuts from the recording to the real thing, for questions. `deque check` warns when a recording is bigger than the screen.
+
+`keys: on` is for a live demo of something driven by keys: the command gets the screen less its last row, and that row shows the last keys pressed, the newest lit, one pressed again as `j ×3`. They go after a couple of seconds. Watchers see them too. At the top of the talk, it's for every `enter:`. Don't type a password with it on.
+
+A poll can have an answer: start that choice with `* `. Watchers aren't told which; the step after the votes dims the others and lights it. It works without `--share` too, for a show of hands.
 
 A `run` block runs in the talk's folder (`sh` `bash` `zsh` `fish` `py` `js` `rb`); a key stops it. Leave out the headline to give its output room.
 
@@ -117,7 +123,7 @@ Headlines move a quarter of a cell at a time. In kitty and Ghostty, moving text 
 
 Code from a file is read again when the file changes, and `deque check` says when the lines or the name aren't there.
 
-A ```` ```graph ```` is a diagram without placing anything: each line names boxes with arrows between them, `->`, or `..>` for a dotted one, and `: text` after the last labels that arrow. deque puts them in columns, left to right, each box one past the furthest box that points at it, and routes the arrows round the boxes, joined where they branch or meet (`├` `┬` `┼`); one that goes back, closing a loop, goes round outside everything. ```` ```graph down ```` lays it out top to bottom instead, for a narrow screen or a tall graph. A `> ` line comes in on a step, its new boxes traced in and its arrows drawn. Lines after the block are centered under it. The slide has a label, but no headline.
+A ```` ```graph ```` is a diagram without placing anything: each line names boxes with arrows between them, `->`, or `..>` for a dotted one, and `: text` after the last labels that arrow. ```` ```graph steps ```` starts with the first box alone and brings each arrow, with the box it reaches, on a key of its own. deque puts them in columns, left to right, each box one past the furthest box that points at it, and routes the arrows round the boxes, joined where they branch or meet (`├` `┬` `┼`); one that goes back, closing a loop, goes round outside everything. ```` ```graph down ```` lays it out top to bottom instead, for a narrow screen or a tall graph. A `> ` line comes in on a step, its new boxes traced in and its arrows drawn. Lines after the block are centered under it. The slide has a label, but no headline.
 
 ````
 ---
@@ -133,6 +139,44 @@ api -> cache: read
 `@REV` after it takes it as it was in git: a commit, branch or tag. On slides in a row, `a.ts#fee@main` then `a.ts#fee` morphs the old function into the new one, a change walked through a slide at a time.
 
 `--rehearse` is a practice run: present as you will on the day, and when you quit, the time you spent on each slide goes into the talk as its `time:` (to the nearest 5 seconds), a slide's own `time:` changed if it had one. `deque notes` then shows, on the day, whether you're ahead of your practice or behind it. Slides you didn't get to are left as they were.
+
+The sky knows what's on the slide. Snow lies a while on the text it lands on; boids perch on a line, and scatter from the pointer; sand heaps on text and on the floor, and runs out when it's deep. `sky: koi` is a pond: koi swimming under lily pads, light crossing the water. Click to feed them: food scatters on the water where you clicked, and each fish makes for the nearest bit and eats it.
+
+`sky: ants` is an ant colony, kept. After it go any of a view, a species and what the nest is in, and how many workers at most: `sky: ants`, `sky: ants ground fire sand 80`, `sky: ants gel black`.
+
+| | |
+|---|---|
+| `farm` | the colony from the side (the default) |
+| `ground` | the same colony from above |
+| `leafcutter` | rust-brown, with majors, the big ones; they cut leaves (the default) |
+| `black` | garden ants; they take what falls on the ground |
+| `fire` | red, quick, and half as many again |
+| `soil` `sand` `gel` | what the nest is in: brown earth (the default), pale sand, or the blue gel of a see-through farm |
+
+It's one colony, seen two ways. From the side, the workers dig the nest as you watch: a shaft down from the entrance, galleries off it, a chamber at the end of each. Every grain is carried up and dropped round the hole, where a mound grows. Foragers bring food to the store: leafcutters cut a piece of leaf from a plant and carry it over their heads to the fungus garden, and the leaves grow back; the others gather what's fallen. While there's food the queen lays; nurses carry her eggs to the nursery, where they turn from egg to larva to pupa and come out pale. The old die where they stand, and are carried to the midden. Dug out, and grown into it, the colony digs another chamber. Text on the slide is stuck on the glass: the nest goes on behind it.
+
+From above it's the same ants, those that are out. Foragers leave the hole looking for food; one that finds some lays scent on its way home, and the others follow it, so trails form between the nest and the food, and fade when the food's gone. They walk round the words. An ant that goes down the hole is gone from this view; in the other, it's coming down the shaft with what it found. `v` goes from one view to the other.
+
+The colony is kept while deque runs: going back to its slide, or looking at it the other way, it's as you left it, however many other skies came between (it waits while it's off the screen). A window resized keeps it too, everything where it was, in proportion.
+
+A click drops food, in either. `deque demo/ants.deque --loop` shows every kind, and goes round by itself; `deque demo/antfarm.deque` is a farm and nothing else, for a screen left on.
+
+A number after a sky is how many: `sky: rain 200`, `sky: koi 3`; for boids, birds and then hawks: `sky: boids 12 3`. With a command for the number, the sky shows something: a bird for every open issue, rain as heavy as the failures.
+
+`${sh: command}` is what a command prints, anywhere `${ENV}` can go: a line, a headline, a chart's number, a sky's. It's run by `sh` (`cmd` on Windows) in the talk's folder when the talk is read, and again each minute while the talk's up; what changed on the slide swings to its new place, a headline's blocks into the new headline. `# ${sh: date +%H:%M}` is a clock. To show a `${` on a slide as it's written, double the dollar: `$${`. A talk with one runs commands when it's opened, not only on a key: read a talk you didn't write before you present it. The editor's preview doesn't run them, and shows `0`.
+
+`--loop` is for a screen left on. Each slide stays up for its `time:` (10 seconds without one), a step at a time, then the next comes; after the last, the first. A `run` block runs again each time round: what it printed last time stays up while it runs, then turns into what it printed now, lines in both moving to their new places. With one slide, the slide stays as it is and only that happens. The keys still work.
+
+```
+sky: boids ${sh: gh issue list --assignee @me | wc -l} 2
+time: 60s
+
+## mine
+# ${sh: date +%H:%M}
+```sh run
+gh issue list --assignee @me
+```
+```
 
 `--calm` (or `calm: on`) keeps still what needn't move: no skies, glow, flourishes, transitions or morphs; things fade in.
 

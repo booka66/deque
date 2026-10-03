@@ -42,19 +42,38 @@ pub const TR: &[Named] = &[
     ("curtain", "bars from both sides, meeting in the middle"),
     ("morph", "the slide before turns into this one: its words, code and headline swing to their new places"),
     ("life", "the slide before becomes Conway's Game of Life and dies out"),
+    ("sand", "the slide before crumbles to sand, falls in a heap and runs out through the floor"),
     ("focus", "the slide before melts into a blur, and this one comes into focus out of it"),
     ("none", "straight to the next slide (the default)"),
 ];
 
 pub const SKY: &[Named] = &[
     ("stars", "stars twinkling and drifting, now and then one shooting across"),
-    ("snow", "snow falling, swaying as it goes"),
+    ("snow", "snow falling, swaying as it goes, lying a while on the text it lands on"),
     ("rain", "rain streaking down"),
     ("embers", "sparks rising from the bottom, flickering out"),
     ("life", "Conway's Game of Life, faint, never settling"),
-    ("boids", "a flock of birds wheeling about, swerving round the text, the pointer, and the two hawks hunting them"),
+    ("boids", "a flock of birds wheeling about, swerving round the text, the pointer, and the two hawks hunting them, now and then one perching on a line"),
     ("fireflies", "a few warm lights drifting, now and then lit"),
+    ("sand", "sand pouring in, heaping on the text and the floor, and running out when it's deep"),
+    ("koi", "a pond: koi swimming under lily pads, light crossing the water; a click scatters food, and they come and eat it"),
+    ("ants", "an ant colony, kept: seen from the side, the nest, dug a grain at a time; from above, the same ants out on the ground, on their trails. After it, any of a view, a species and what it's in, and how many: sky: ants ground fire sand 80. A click drops food; v is the other view"),
     ("none", "the terminal's own background (the default)"),
+];
+
+/// What `sky: ants` can say after it, one of each: the view, the species,
+/// and what the nest is in.
+pub const ANTS: [&[Named]; 3] = [
+    &[
+        ("farm", "the colony from the side: a shaft, galleries and chambers, dug as you watch; the queen, her brood, the store, the midden (the default)"),
+        ("ground", "the same colony from above: those that are out, finding food by scent, trails forming round the words"),
+    ],
+    &[
+        ("leafcutter", "rust-brown, with majors: they climb the plants, cut leaf and carry it overhead to the fungus garden (the default)"),
+        ("black", "garden ants: they take what falls on the ground"),
+        ("fire", "red, quick, and more of them"),
+    ],
+    &[("soil", "brown earth (the default)"), ("sand", "pale sand"), ("gel", "blue gel, as in the farms you can see through")],
 ];
 
 pub const COLORS: &[Named] = &[
@@ -86,13 +105,14 @@ pub const SLIDE: &[Opt] = &[
     opt("reveal", "how a step (`> line`) arrives", LINES),
     opt("then", "flourishes once the slide is all there, space-separated", THEN),
     opt("tr", "how the slide before this one leaves", TR),
-    opt("sky", "what moves behind the slide, the whole time it's up", SKY),
+    opt("sky", "what moves behind the slide, the whole time it's up. A number after it is how many: sky: rain 200; for boids, birds then hawks: sky: boids 12 3", SKY),
     opt("glow", "the headline lighting what's around it, breathing", ON_OFF),
     opt("enter", "a command enter runs instead of going on: a TUI, a shell, a demo. Run by sh (cmd on Windows) in the talk's folder", &[]),
     opt("play", "a recording (an asciinema .cast) enter plays instead of running something live: space pauses, → skips to its next marker, q stops. With `enter` too, enter cuts to that, live", &[]),
     opt("cols", "with --tv, how many columns wide the screen is while `enter` runs", &[]),
+    opt("keys", "while `enter` runs, the keys you press shown on a row under it, the newest lit, so the room can follow a TUI", ON_OFF),
     opt("draw", "a drawn slide, WIDTHxHEIGHT: its lines are drawing commands, not text", &[]),
-    opt("time", "how long the slide's meant to be up, for pacing in deque notes: 90s, 2m, 1m30s", &[]),
+    opt("time", "how long the slide's meant to be up, for pacing in deque notes, and how long --loop keeps it up: 90s, 2m, 1m30s", &[]),
 ];
 
 /// Settings for the whole talk, before the first `---`.
@@ -102,9 +122,10 @@ pub const TALK: &[Opt] = &[
     opt("reveal", "how steps arrive, unless a slide says otherwise", LINES),
     opt("then", "flourishes on every slide, unless a slide says otherwise", THEN),
     opt("tr", "how slides leave, unless a slide says otherwise", TR),
-    opt("sky", "what moves behind every slide, unless a slide says otherwise; one sky goes on from slide to slide", SKY),
+    opt("sky", "what moves behind every slide, unless a slide says otherwise; one sky goes on from slide to slide. A number after it is how many: sky: rain 200", SKY),
     opt("glow", "headlines lighting what's around them, unless a slide says otherwise", ON_OFF),
     opt("cursor", "whether the cursor shows; --cursor and --no-cursor win over it", ON_OFF),
+    opt("keys", "the keys you press shown under every `enter`, unless a slide says otherwise", ON_OFF),
     opt("calm", "nothing moves that needn't: no skies, glow, flourishes, transitions or morphs; what arrives fades in. --calm does the same", ON_OFF),
     opt("accent", "color: headlines, and what should stand out. #rrggbb or 38;2;r;g;b", &[]),
     opt("muted", "color: asides and labels. #rrggbb or 38;2;r;g;b", &[]),
@@ -133,10 +154,11 @@ pub const SYNTAX: &[(&str, &str)] = &[
     ("## ", "the slide's label, small and numbered above the headline"),
     ("# ", "the headline, in block letters"),
     ("> ", "a step: the line comes in on a key"),
-    ("```", "lines between two of these line up in a column instead of each being centered. With a language (```ts), they're code, highlighted, and taken as they are; code in the same language on the next slide morphs into its code. After the language: run (sh bash zsh fish py js rb) runs it on a step; a file (src/a.ts, src/a.ts:10-24, src/a.ts#name) takes its lines from there, and @REV after it (src/a.ts#name@HEAD~2) as it was at that revision in git; focus: 2|4-5 lights those lines a step each. ```chart lines are a label and a number: bars. ```poll lines are choices: with --share, watchers vote on them, and the bars grow as they do"),
+    ("```", "lines between two of these line up in a column instead of each being centered. With a language (```ts), they're code, highlighted, and taken as they are; code in the same language on the next slide morphs into its code. After the language: run (sh bash zsh fish py js rb) runs it on a step; a file (src/a.ts, src/a.ts:10-24, src/a.ts#name) takes its lines from there, and @REV after it (src/a.ts#name@HEAD~2) as it was at that revision in git; focus: 2|4-5 lights those lines a step each. ```chart lines are a label and a number: bars. ```poll lines are choices: with --share, watchers vote on them, and the bars grow as they do; a `* ` choice is the answer, lit on a step of its own. A ```chart number can be a ${NAME}"),
     ("```graph", "a diagram: lines of boxes and arrows, a -> b -> c (..> dotted, `: label` after the last), laid out left to right for you (```graph down: top to bottom); a `> ` line comes in on a step. Text after the block goes under it. The slide has a label, no headline"),
     ("|", "a table row: | a | b |; a row of --- under the first makes it a header"),
     ("![", "![label](file.png): a picture. Several on one line go side by side, labelled; on lines of their own, stacked. Text lines become the caption"),
+    ("${", "${NAME}: an environment variable's value. ${sh: command}: what the command prints, run in the talk's folder when the talk's read, and again each minute while it's up, what changed swinging to its new place: # ${sh: date +%H:%M} is a clock, sky: boids ${sh: gh issue list | wc -l} a bird a task. $${ is a ${ left as it's written"),
     ("//", "in a slide, a speaker note, shown by `deque notes`; before the first `---`, a comment"),
 ];
 

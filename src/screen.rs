@@ -56,12 +56,25 @@ pub struct Screen {
     pub clip: (bool, bool),
     /// calm: watchers' reactions don't rise up the screen.
     pub calm: bool,
+    /// Ant colonies not on the screen just now, each by what its `sky:`
+    /// said of it, but for which way it's seen: going back to its slide,
+    /// or looking at it the other way, it's as it was left.
+    colonies: Vec<(String, crate::ants::Colony)>,
+    /// v was pressed: an ant colony's seen the other way, from above
+    /// where the slide says from the side, and from the side where it
+    /// says from above.
+    pub other_view: bool,
 }
 
 #[derive(Default)]
 pub struct Rec {
     pub clock: f64,
     pub frames: Vec<(f64, String)>,
+}
+
+/// Which ant colony a `sky: ants` means: what it says, less the view.
+fn colony(said: &str) -> String {
+    said.split_whitespace().filter(|w| *w != "farm" && *w != "ground").collect::<Vec<_>>().join(" ")
 }
 
 /// A small xorshift, seeded where an effect should look the same each time.
@@ -123,6 +136,8 @@ impl Screen {
             tap: None,
             clip: (false, false),
             calm: false,
+            colonies: vec![],
+            other_view: false,
         };
         s.size();
         s
@@ -143,11 +158,21 @@ impl Screen {
         if let Ok((w, h)) = crossterm::terminal::size() {
             let was = (self.w, self.h);
             (self.w, self.h) = (w as i32, h as i32);
-            if was != (self.w, self.h)
-                && let Some(s) = self.sky.take()
-            {
-                self.backdrop(s.kind, s.glow);
+            self.resize_sky(was);
+        }
+    }
+
+    /// The screen's another size than it `was`: the sky made again for it.
+    /// An ant colony goes with it, sized to fit.
+    fn resize_sky(&mut self, was: (i32, i32)) {
+        if was != (self.w, self.h) {
+            // v's already in what the sky says.
+            let flip = std::mem::take(&mut self.other_view);
+            self.shelve();
+            if let Some(s) = self.sky.take() {
+                self.backdrop(s.kind, s.glow, s.many, &s.said);
             }
+            self.other_view = flip;
         }
     }
 
@@ -156,21 +181,43 @@ impl Screen {
         self.rec.as_ref().map_or_else(|| self.born.elapsed().as_secs_f64(), |r| r.clock)
     }
 
-    /// The slide's sky. One the same as the last is kept, so it goes on
-    /// moving from slide to slide.
-    pub fn backdrop(&mut self, kind: Kind, glow: bool) {
+    /// The slide's sky, and how many of what's in it, where the talk says.
+    /// One the same as the last is kept, so it goes on moving from slide to
+    /// slide.
+    pub fn backdrop(&mut self, kind: Kind, glow: bool, many: [Option<usize>; 2], said: &str) {
+        // With v, the other view of an ant colony than the one it says.
+        let said = &match (kind == Kind::Ants && self.other_view, said.split_whitespace().any(|w| w == "ground")) {
+            (false, _) => said.to_string(),
+            (true, true) => said.split_whitespace().filter(|w| *w != "ground" && *w != "farm").collect::<Vec<_>>().join(" "),
+            (true, false) => std::iter::once("ground").chain(said.split_whitespace().filter(|w| *w != "farm")).collect::<Vec<_>>().join(" "),
+        };
         if kind == Kind::None && !glow && !self.pointing() && !self.reacting() {
+            self.shelve();
             self.sky = None;
             return;
         }
-        if let Some(s) = self.sky.as_mut().filter(|s| s.kind == kind) {
+        if let Some(s) = self.sky.as_mut().filter(|s| s.kind == kind && s.said == *said) {
             s.glow = glow;
+            if s.many != many {
+                s.crowd(many);
+            }
             return;
         }
+        self.shelve();
         let (pointer, ripples, trail, floats) = self.sky.take().map(|s| (s.pointer, s.ripples, s.trail, s.floats)).unwrap_or_default();
-        self.make_sky(kind, glow);
+        let kept = self.colonies.iter().position(|c| kind == Kind::Ants && c.0 == colony(said)).map(|k| self.colonies.remove(k).1);
+        self.make_sky(kind, glow, said, many, kept);
         let s = self.sky.as_mut().unwrap();
         (s.pointer, s.ripples, s.trail, s.floats) = (pointer, ripples, trail, floats);
+    }
+
+    /// The sky's ant colony, if it has one, put by for when its slide's
+    /// back.
+    fn shelve(&mut self) {
+        if let Some((said, a)) = self.sky.as_mut().and_then(|s| Some((colony(&s.said), s.take_ants()?))) {
+            self.colonies.retain(|c| c.0 != said);
+            self.colonies.push((said, a));
+        }
     }
 
     fn pointing(&self) -> bool {
@@ -276,10 +323,17 @@ impl Screen {
         self.sky_frame();
     }
 
-    fn make_sky(&mut self, kind: Kind, glow: bool) {
+    /// A sky, with what the talk said of it, and the ant colony kept for
+    /// it if there's one, all before it's first drawn.
+    fn make_sky(&mut self, kind: Kind, glow: bool, said: &str, many: [Option<usize>; 2], kept: Option<crate::ants::Colony>) {
         let n = (self.w * self.h).max(0) as usize;
         (self.front, self.seen) = (vec![None; n], vec![None; n]);
         let mut sky = Sky::new(kind, glow, self.w, self.h, self.rng.below(1 << 30) as u32);
+        sky.said = said.to_string();
+        sky.crowd(many);
+        if let Some(a) = kept {
+            sky.give_ants(a);
+        }
         self.sky_at = self.now();
         sky.frame(self.sky_at, &self.theme, &self.front, self.w as usize);
         self.sky = Some(sky);
@@ -297,7 +351,7 @@ impl Screen {
     /// Ready to frost: the screen kept cell by cell from here on.
     pub fn keep(&mut self) {
         if self.sky.is_none() {
-            self.make_sky(Kind::None, false);
+            self.make_sky(Kind::None, false, "", [None; 2], None);
         }
     }
 
@@ -642,4 +696,51 @@ fn truecolor() -> bool {
         || env("TERM").contains("kitty")
         || env("TERM").contains("direct")
         || !env("WT_SESSION").is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ant_colony_is_kept_while_its_slide_is_away() {
+        let mut s = Screen::recording(Theme::default(), 80, 24);
+        // Which colony the sky has, and the screen it's sized for.
+        let which = |s: &mut Screen| {
+            let a = s.sky.as_mut().unwrap().take_ants().unwrap();
+            let got = (a.seed(), a.size());
+            s.sky.as_mut().unwrap().give_ants(a);
+            got
+        };
+        s.backdrop(Kind::Ants, false, [None; 2], "fire");
+        let fire = which(&mut s);
+        // Another sky, no sky, another colony; then back: the same one.
+        s.backdrop(Kind::Stars, false, [None; 2], "");
+        s.backdrop(Kind::None, false, [None; 2], "");
+        s.backdrop(Kind::Ants, false, [None; 2], "black");
+        assert_ne!(which(&mut s), fire);
+        s.backdrop(Kind::Ants, false, [None; 2], "fire");
+        assert_eq!(which(&mut s), fire);
+        // From above it's the same colony, said on the slide or with v.
+        s.backdrop(Kind::Ants, false, [None; 2], "ground fire");
+        assert_eq!(which(&mut s), fire);
+        s.other_view = true;
+        s.backdrop(Kind::Ants, false, [None; 2], "ground fire");
+        assert_eq!(s.sky.as_ref().unwrap().said, "fire");
+        assert_eq!(which(&mut s), fire);
+        s.backdrop(Kind::Ants, false, [None; 2], "fire");
+        assert_eq!(s.sky.as_ref().unwrap().said, "ground fire");
+        assert_eq!(which(&mut s), fire);
+        s.other_view = false;
+        // The window another size: the same colony, sized to it, on the
+        // screen or put by.
+        s.backdrop(Kind::Ants, false, [None; 2], "black");
+        let black = which(&mut s).0;
+        s.rec = None;
+        (s.w, s.h) = (100, 40);
+        s.resize_sky((80, 24));
+        assert_eq!(which(&mut s), (black, (200, 80)));
+        s.backdrop(Kind::Ants, false, [None; 2], "fire");
+        assert_eq!(which(&mut s), (fire.0, (200, 80)));
+    }
 }

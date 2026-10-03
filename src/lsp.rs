@@ -272,7 +272,13 @@ fn complete(at: &At) -> Vec<Value> {
         Place::Body { .. } => None,
     };
     // An option's value, after its colon.
-    if let (Some(opts), Some((k, _))) = (opts, before.split_once(':')) {
+    if let (Some(opts), Some((k, v))) = (opts, before.split_once(':')) {
+        // After `sky: ants`: what it can say of the colony, one of each,
+        // those not said yet.
+        if let Some(said) = v.trim_start().strip_prefix("ants ").filter(|_| k == "sky" && spec::find(opts, k).is_some()) {
+            let unsaid = |set: &&&[Named]| !said.split_whitespace().any(|w| set.iter().any(|(n, _)| *n == w));
+            return spec::ANTS.iter().filter(unsaid).flat_map(|set| set.iter()).map(|(n, d)| item(n, n, VALUE, d, d)).collect();
+        }
         return match spec::find(opts, k) {
             Some(o) => o.values.iter().map(|(n, d)| item(n, n, VALUE, d, d)).collect(),
             None => vec![],
@@ -363,6 +369,12 @@ fn hover(at: &At) -> Value {
             if b <= k.len() {
                 return md(format!("**{k}**: {}", opt_doc(o)));
             }
+            // What `sky: ants` says of the colony: before the skies, one
+            // of which, sand, is also what a colony can be in.
+            let ants = at.line.split_once(':').is_some_and(|(_, v)| v.split_whitespace().next() == Some("ants"));
+            if let Some((n, d)) = spec::ANTS.iter().flat_map(|set| set.iter()).find(|(n, _)| k == "sky" && ants && *n == word) {
+                return md(format!("`sky: ants {n}`: {d}"));
+            }
             if let Some((n, d)) = o.values.iter().find(|(n, _)| *n == word) {
                 return md(format!("`{k}: {n}`: {d}"));
             }
@@ -407,4 +419,32 @@ fn outline(text: &str, dir: &std::path::Path) -> Value {
         })
         .collect();
     json!(syms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(line: &str) -> At<'_> {
+        At { place: Place::Options { draw: false }, line, col: line.chars().count(), dir: PathBuf::from(".") }
+    }
+
+    #[test]
+    fn an_ant_colony_is_offered_and_explained() {
+        let labels = |line: &str| -> Vec<String> { complete(&at(line)).iter().map(|i| i["label"].as_str().unwrap().to_string()).collect() };
+        // A sky: the colony among them, and the newer ones.
+        let skies = labels("sky: ");
+        assert!(["ants", "koi", "sand"].iter().all(|k| skies.iter().any(|s| s == k)));
+        // After it, a view, a species and what it's in; said, not again.
+        assert_eq!(labels("sky: ants "), ["farm", "ground", "leafcutter", "black", "fire", "soil", "sand", "gel"]);
+        assert_eq!(labels("sky: ants ground fire "), ["soil", "sand", "gel"]);
+        assert!(labels("sky: stars ").iter().all(|l| l != "ground"));
+        let said = |line: &str, col: usize| hover(&At { col, ..at(line) })["contents"]["value"].as_str().unwrap_or("").to_string();
+        assert!(said("sky: ants ground fire", 12).starts_with("`sky: ants ground`: the same colony from above"));
+        assert!(said("sky: ants ground fire", 19).contains("red, quick"));
+        assert!(said("sky: ants", 7).starts_with("`sky: ants`: an ant colony"));
+        // sand is a sky of its own, and what a colony's in.
+        assert!(said("sky: sand", 7).contains("pouring"));
+        assert!(said("sky: ants sand", 12).contains("pale sand"));
+    }
 }

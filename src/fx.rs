@@ -308,6 +308,41 @@ fn typewriter(s: &mut Screen, a: &Art) {
     a.done(s);
 }
 
+/// Lines decoding together: noise settling into every line at once, left to
+/// right, so a block of code takes as long as one line would.
+pub fn lines_scramble(s: &mut Screen, lines: &[(i32, &Line)]) {
+    let noise: Vec<char> = "abcdefghkmnpqrstuvwxyz0123456789#%&*+=?".chars().collect();
+    let st = s.muted();
+    let big = 10;
+    for f in 1..=big {
+        if s.hurry {
+            break;
+        }
+        for (row, t) in lines {
+            let p = markup::bare(t);
+            let (col, n) = (s.mid(markup::width(t)), p.len() as i32);
+            let o: Line = p
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let ch = if c.ch == ' ' || (i as i32 + 1) * big <= f * n {
+                        c.ch
+                    } else {
+                        noise[s.rng.below(noise.len() as i32) as usize]
+                    };
+                    Cell { ch, st }
+                })
+                .collect();
+            s.put(*row, col, &o);
+        }
+        s.tick(0.02);
+    }
+    for (row, t) in lines {
+        let col = s.mid(markup::width(t));
+        s.put(*row, col, t);
+    }
+}
+
 /// A line coming in, centered on its row.
 pub fn line_in(s: &mut Screen, name: &str, row: i32, t: &Line) {
     let p = markup::bare(t);

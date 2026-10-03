@@ -1,5 +1,6 @@
 //! deque: a talk in the terminal, from a text file.
 
+mod ants;
 mod figlet;
 mod fine;
 mod cast;
@@ -23,6 +24,7 @@ mod render;
 mod replay;
 mod rtc;
 mod run;
+mod sand;
 mod screen;
 mod share;
 mod sky;
@@ -66,6 +68,11 @@ deque: slides in your terminal
   --cursor, --no-cursor   show or hide the cursor (the talk's `cursor:` otherwise)
   --calm                  nothing moves that needn't: no skies, glow,
                           flourishes, transitions or morphs (as calm: on)
+  --loop                  it goes on by itself: each slide up for its time:
+                          (10s when it has none), a step at a time, and after
+                          the last, the first. What a slide runs is run again
+                          each time round, its output turning into the new.
+                          For a screen left on
   --rehearse              present it as a practice run: when it's over, the
                           time you spent on each slide is written into the
                           talk as its time:, for deque notes to pace you by
@@ -89,7 +96,8 @@ deque: slides in your terminal
                           not the terminal's font (DEQUE_FACE, or its config)
 
 keys: → space enter n on · ← b back · 12 enter: slide 12 · ' back from a jump
-      o all slides, / to find one · r replay · B blank · w how to watch
+      o all slides, / to find one · r replay · B blank · v ants, the other
+      view · w how to watch
       (--share) · home end · q q quit · ? all of them
 the mouse is a laser pointer
 The talk reloads when you save it, and shows the slide you changed.";
@@ -277,7 +285,7 @@ fn present(args: &[String]) -> Result<(), String> {
     let (mut start, mut print, mut tv, mut cursor, mut sharing, mut curl) = (1usize, false, false, None, false, false);
     let mut local = false;
     let mut own_font = true;
-    let (mut calm, mut practice) = (false, false);
+    let (mut calm, mut practice, mut looping) = (false, false, false);
     let (mut cast, mut html, mut size) = (None, None, (100, 30));
     let mut rest = vec![];
     let mut it = args.iter();
@@ -293,6 +301,7 @@ fn present(args: &[String]) -> Result<(), String> {
             "--share" => sharing = true,
             "--calm" => calm = true,
             "--rehearse" => practice = true,
+            "--loop" => looping = true,
             "--share-curl" => (sharing, curl) = (true, true),
             "--share-no-font" => (sharing, own_font) = (true, false),
             "--share-local" => (sharing, local) = (true, true),
@@ -460,6 +469,14 @@ fn present(args: &[String]) -> Result<(), String> {
     let mut spent = vec![0.0f64; talk.slides.len()];
     let mut since = Instant::now();
     let mut on = n;
+    // --loop: since when the slide, or its last step, has been up.
+    let mut idle = Instant::now();
+    // A talk that says what commands print is read again each minute, off
+    // to one side, so nothing on the screen waits for them: the minute it
+    // was last read in, the reading under way, and the talk it gave.
+    let mut minute = minute_now();
+    let mut reading: Option<std::sync::mpsc::Receiver<Result<Talk, String>>> = None;
+    let mut reread: Option<Talk> = None;
     loop {
         if n != on {
             if let Some(t) = spent.get_mut(on) {
@@ -500,7 +517,8 @@ fn present(args: &[String]) -> Result<(), String> {
         was = n;
         if let Some(r) = &slide.run {
             if mode == Mode::Step && shown == r.step {
-                ran.insert(n, run::go(&mut s, &talk, n));
+                let out = run::go(&mut s, &talk, n, ran.get(&n).filter(|_| looping));
+                ran.insert(n, out);
             } else if let Some(o) = ran.get(&n).filter(|_| shown >= r.step) {
                 run::show(&mut s, &talk, n, o, false);
             }
@@ -522,6 +540,9 @@ fn present(args: &[String]) -> Result<(), String> {
         if !jump.is_empty() {
             let st = markup::Style::fg(talk.theme.accent);
             s.put_str(s.h, 2, &format!("go to {jump}_  "), st);
+        }
+        if mode != Mode::Still {
+            idle = Instant::now();
         }
         mode = Mode::Still;
         }
@@ -572,7 +593,7 @@ fn present(args: &[String]) -> Result<(), String> {
                     let votes = sh.hub.tally(&p);
                     let before = talk.slides[n].tally(&votes, talk.theme.accent, talk.theme.muted);
                     if !small {
-                        render::tallied(&mut s, &talk, n, &before);
+                        render::tallied(&mut s, &talk, n, &before, shown);
                         s.flush();
                     }
                 }
@@ -589,6 +610,32 @@ fn present(args: &[String]) -> Result<(), String> {
                         },
                     };
                 }
+                // --loop: the slide's had its time, shared among its steps.
+                // One slide, all there: its whole time till it's run again.
+                let slide = &talk.slides[n];
+                let parts = if talk.slides.len() == 1 && shown == slide.steps() { 1 } else { slide.steps() + 1 };
+                if looping && idle.elapsed().as_secs_f64() >= slide.time.unwrap_or(10) as f64 / parts as f64 {
+                    break Act::Next;
+                }
+                if talk.live && reading.is_none() && minute_now() != minute {
+                    minute = minute_now();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let path = path.clone();
+                    std::thread::spawn(move || tx.send(load(&path, true)));
+                    reading = Some(rx);
+                }
+                match reading.as_ref().map(|rx| rx.try_recv()) {
+                    Some(Ok(got)) => {
+                        reading = None;
+                        // One that failed this time: what's up stays up.
+                        if let Ok(t) = got {
+                            reread = Some(t);
+                            break Act::Fresh;
+                        }
+                    }
+                    Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => reading = None,
+                    _ => {}
+                }
                 let now = stamps(&path, &talk);
                 if now != stamp {
                     stamp = now;
@@ -604,6 +651,7 @@ fn present(args: &[String]) -> Result<(), String> {
                             stamp = stamps(&path, &talk);
                             src = new;
                             ran.clear();
+                            (reading, reread) = (None, None);
                             if let Some(sh) = &share {
                                 sh.hub.theme(&talk.theme);
                             }
@@ -645,13 +693,14 @@ fn present(args: &[String]) -> Result<(), String> {
             a => a,
         };
         // Anything but a quit: the first q forgotten.
-        if !matches!(act, Act::Quit | Act::None) && note.as_ref().is_some_and(|(t, _)| t == QUIT) {
+        if !matches!(act, Act::Quit | Act::None | Act::Fresh) && note.as_ref().is_some_and(|(t, _)| t == QUIT) {
             note = None;
         }
         // The offer's gone at the first key, and drawn over.
         let offered = offer;
-        if !matches!(act, Act::None | Act::Redraw) {
+        if !matches!(act, Act::None | Act::Redraw | Act::Fresh) {
             offer = false;
+            idle = Instant::now();
         }
         let from = n;
         match act {
@@ -663,6 +712,9 @@ fn present(args: &[String]) -> Result<(), String> {
                 hold = !offered;
             }
             Act::Help => render::help(&mut s, &talk, n),
+            // An ant colony the other way: the farm's, from above; the
+            // ground's, from the side.
+            Act::View => s.other_view = !s.other_view,
             Act::Blank => render::blank(&mut s, &talk, n, shown),
             Act::Leap => {
                 if let Some(k) = leap {
@@ -717,6 +769,29 @@ fn present(args: &[String]) -> Result<(), String> {
             }
             Act::Next if shown < steps => (shown, mode) = (shown + 1, Mode::Step),
             Act::Next if n < last => (n, shown, mode) = (n + 1, 0, render::arrive(&talk, n + 1)),
+            // --loop, with one slide: it stays as it is, and what it runs
+            // is run again.
+            Act::Next if looping && last == 0 => {
+                if slide.run.is_some() {
+                    let out = run::go(&mut s, &talk, n, ran.get(&n));
+                    ran.insert(n, out);
+                }
+                hold = true;
+            }
+            Act::Next if looping => (n, shown, mode) = (0, 0, Mode::Arrive),
+            // The talk read again: what's changed on this slide swings to
+            // its new place; unchanged, the screen's left as it is.
+            Act::Fresh => {
+                let mut t = reread.take().expect("a talk read again");
+                adopt(&mut t, term_bg, calm);
+                let old = std::mem::replace(&mut talk, t);
+                spent.resize(talk.slides.len(), 0.0);
+                stamp = stamps(&path, &talk);
+                let same = old.slides.len() == talk.slides.len();
+                n = n.min(talk.slides.len() - 1);
+                shown = shown.min(talk.slides[n].steps());
+                hold = same && !render::retell(&mut s, &old, &talk, n, shown);
+            }
             Act::Next => {
                 note = Some(("the end".into(), Instant::now()));
                 hold = !offered;
@@ -769,6 +844,8 @@ const QUIT: &str = "q again to quit";
 enum Act {
     None,
     Redraw,
+    Fresh,
+    View,
     Quit,
     Exit,
     Help,
@@ -793,6 +870,7 @@ fn act(k: KeyEvent) -> Act {
     match k.code {
         KeyCode::Char('c') if ctrl => Act::Exit,
         KeyCode::Char('?') => Act::Help,
+        KeyCode::Char('v') => Act::View,
         KeyCode::Char('B' | '.') => Act::Blank,
         KeyCode::Char('\'') => Act::Leap,
         KeyCode::Char('q') | KeyCode::Esc => Act::Quit,
@@ -811,6 +889,11 @@ fn act(k: KeyEvent) -> Act {
         KeyCode::Right | KeyCode::PageDown | KeyCode::Char('n' | 'l' | 'j') => Act::Next,
         _ => Act::None,
     }
+}
+
+/// Which minute it is, counted from 1970.
+fn minute_now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 60)
 }
 
 /// The first slide whose text changed between two versions of the talk.
@@ -835,9 +918,11 @@ fn live(s: &mut Screen, talk: &Talk, slide: &talk::Slide, font: Option<&ghostty:
     s.flush();
     // Watchers watching: through a terminal of deque's own, so they see it
     // too.
+    // And with keys: on, so the keys pressed can show under it.
     #[cfg(unix)]
-    if let Some(hub) = s.tap.clone() {
-        if let Err(e) = relay::run(cmd, &talk.dir, &hub) {
+    if s.tap.is_some() || slide.keys.or(talk.keys) == Some(true) {
+        let strip = (slide.keys.or(talk.keys) == Some(true)).then(|| relay::Strip::new(talk.theme.accent, talk.theme.muted, talk.theme.bg));
+        if let Err(e) = relay::run(cmd, &talk.dir, s.tap.as_ref(), strip) {
             eprint!("deque: {cmd}: {e}\r\n");
             std::thread::sleep(Duration::from_secs(2));
         }

@@ -77,6 +77,8 @@ pub struct Poll {
     pub id: String,
     pub choices: Vec<String>,
     pub at: usize,
+    /// Its `* ` choice, the answer, and the step that says so.
+    pub answer: Option<(usize, usize)>,
 }
 
 /// A poll's bar, as wide as a chart's, and its count, for `votes` votes of
@@ -149,6 +151,9 @@ pub struct Slide {
     /// A recording to play on enter, instead of or before `enter`.
     pub play: Option<PathBuf>,
     pub cols: Option<i32>,
+    /// keys: on or off, where the slide says: the keys pressed while
+    /// `enter` runs, shown under it.
+    pub keys: Option<bool>,
     pub fx: Effects,
     /// The language of its first ```lang block.
     pub lang: Option<String>,
@@ -202,7 +207,8 @@ impl Slide {
             Some(d) => d.groups.len() - 1,
             None => {
                 let (run, focus) = (self.run.as_ref().map(|r| r.step), self.focus.iter().map(|f| f.step));
-                self.body.iter().map(|b| b.step).chain(run).chain(focus).max().unwrap_or(0)
+                let answer = self.poll.as_ref().and_then(|p| p.answer).map(|a| a.1);
+                self.body.iter().map(|b| b.step).chain(run).chain(focus).chain(answer).max().unwrap_or(0)
             }
         }
     }
@@ -216,12 +222,17 @@ pub struct Talk {
     /// calm: on, or --calm: nothing moves that needn't. No skies, glow,
     /// flourishes, transitions or morphs; what arrives fades in.
     pub calm: bool,
+    /// keys: for every slide that doesn't say.
+    pub keys: Option<bool>,
     pub slides: Vec<Slide>,
     pub dir: PathBuf,
     /// The environment variables it reads, for --tv to take along.
     pub vars: Vec<String>,
     /// The files its code comes from, to read again when they change.
     pub files: Vec<PathBuf>,
+    /// Whether it says what a command printed (`${sh: …}`): read again each
+    /// minute, for what's changed.
+    pub live: bool,
 }
 
 impl Talk {
@@ -323,6 +334,35 @@ struct P<'a> {
     lenient: bool,
     dir: &'a Path,
     n: usize,
+    live: bool,
+}
+
+/// Where the `{` a string starts with closes, its own braces counted, so
+/// a command can have them: awk '{print $1}'.
+fn closing(s: &str) -> Option<usize> {
+    let mut depth = 0;
+    s.char_indices().find_map(|(k, c)| {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        (depth == 0).then_some(k)
+    })
+}
+
+/// What a command prints, run by sh (cmd on Windows) in the talk's folder:
+/// its lines on one, the space round them gone.
+fn sh(cmd: &str, dir: &Path) -> Result<String, String> {
+    let mut c = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+    c.arg(if cfg!(windows) { "/C" } else { "-c" }).arg(cmd).current_dir(dir).stdin(std::process::Stdio::null());
+    let out = c.output().map_err(|e| format!("`{cmd}`: {e}"))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.lines().find(|l| !l.trim().is_empty()).map_or(format!("{}", out.status), |l| l.trim().to_string());
+        return Err(format!("`{cmd}` failed: {why}"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 impl P<'_> {
@@ -335,16 +375,36 @@ impl P<'_> {
 
     /// `${NAME}` from the environment. Missing is an error to present with,
     /// a warning in the editor, which may not have what the talk's wrapper
-    /// sets.
+    /// sets. `${sh: command}` is what the command prints; the editor
+    /// doesn't run it, and shows 0. `$${` is a `${` left as it's written.
     fn interp(&mut self, s: &str) -> String {
         let mut out = String::new();
         let mut rest = s;
         while let Some(i) = rest.find("${") {
-            let Some(j) = rest[i..].find('}') else { break };
+            if rest[..i].ends_with('$') {
+                out.push_str(&rest[..i - 1]);
+                out.push_str("${");
+                rest = &rest[i + 2..];
+                continue;
+            }
+            let cmd = rest[i + 2..].starts_with("sh:");
+            let Some(j) = (if cmd { closing(&rest[i + 1..]).map(|k| k + 1) } else { rest[i..].find('}') }) else { break };
             let name = &rest[i + 2..i + j];
             out.push_str(&rest[..i]);
             let col = s.len() - rest.len() + i;
             let (col, end) = (s[..col].chars().count(), s[..col + j + 1].chars().count());
+            rest = &rest[i + j + 1..];
+            if cmd {
+                self.live = true;
+                match self.lenient {
+                    true => out.push('0'),
+                    false => match sh(name[3..].trim(), self.dir) {
+                        Ok(v) => out.push_str(&v),
+                        Err(e) => self.err(col, end, e),
+                    },
+                }
+                continue;
+            }
             if !self.vars.iter().any(|v| v == name) {
                 self.vars.push(name.to_string());
             }
@@ -353,7 +413,6 @@ impl P<'_> {
                 Err(_) if self.lenient => self.warn(col, end, format!("${{{name}}} isn't set here; it must be when the talk runs")),
                 Err(_) => self.err(col, end, format!("${{{name}}} isn't set")),
             }
-            rest = &rest[i + j + 1..];
         }
         out.push_str(rest);
         out
@@ -384,6 +443,46 @@ impl P<'_> {
         None
     }
 
+    /// A sky, and after it how many: `rain 200`, or `boids 12 3`, twelve
+    /// birds and three hawks.
+    fn sky(&mut self, v: &str, col: usize) -> Option<String> {
+        let mut words = v.split_whitespace();
+        let kind = self.one_of("sky", words.next().unwrap_or(""), col, spec::SKY)?;
+        // An ant colony says more: which view, which ants, what they're in.
+        if kind == "ants" {
+            let (mut sets, mut n) = ([false; 3], 0);
+            for w in words {
+                match spec::ANTS.iter().position(|set| set.iter().any(|(name, _)| *name == w)) {
+                    Some(k) if !sets[k] => sets[k] = true,
+                    None if w.parse::<usize>().is_ok() && n == 0 => n += 1,
+                    _ => {
+                        let all = spec::ANTS.iter().map(|set| spec::names(set)).collect::<Vec<_>>().join("; ");
+                        let near = spec::near(w, spec::ANTS.iter().flat_map(|set| set.iter().map(|(name, _)| *name)));
+                        self.err(col, col + v.chars().count(), format!("sky: ants takes one of each, and how many: {near}there's {all}"));
+                        return Some(kind);
+                    }
+                }
+            }
+            return Some(v.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+        let nums: Vec<&str> = words.collect();
+        let most = match kind.as_str() {
+            "boids" => 2,
+            "stars" | "snow" | "rain" | "embers" | "fireflies" | "koi" => 1,
+            _ => 0,
+        };
+        if nums.len() > most || nums.iter().any(|n| n.parse::<usize>().is_err()) {
+            let msg = match most {
+                0 => format!("sky: {kind} takes nothing after it"),
+                1 => format!("after sky: {kind} goes how many, a number: sky: {kind} 40"),
+                _ => "after sky: boids goes how many birds, then how many hawks: sky: boids 12 3".into(),
+            };
+            self.err(col, col + v.chars().count(), msg);
+            return Some(kind);
+        }
+        Some(std::iter::once(kind.as_str()).chain(nums).collect::<Vec<_>>().join(" "))
+    }
+
     /// An effect option, into e. Returns whether the key was one.
     fn effect(&mut self, e: &mut Effects, k: &str, v: &str, col: usize) -> bool {
         match k {
@@ -391,7 +490,7 @@ impl P<'_> {
             "lines" => e.lines = self.one_of("lines effect", v, col, spec::LINES),
             "reveal" => e.reveal = self.one_of("reveal effect", v, col, spec::LINES),
             "tr" => e.tr = self.one_of("transition", v, col, spec::TR),
-            "sky" => e.sky = self.one_of("sky", v, col, spec::SKY),
+            "sky" => e.sky = self.sky(v, col),
             "glow" => e.glow = self.one_of("glow", v, col, spec::ON_OFF),
             "then" => {
                 let mut all = vec![];
@@ -411,10 +510,11 @@ impl P<'_> {
 }
 
 pub fn parse(src: &str, dir: &Path, lenient: bool) -> (Talk, Vec<Diag>) {
-    let mut p = P { files: vec![], diags: vec![], theme: Theme::default(), vars: vec![], lenient, dir, n: 0 };
+    let mut p = P { files: vec![], diags: vec![], theme: Theme::default(), vars: vec![], lenient, dir, n: 0, live: false };
     let mut talk_fx = Effects::default();
     let mut cursor = true;
     let mut calm = false;
+    let mut keys = None;
     let lines: Vec<&str> = src.lines().collect();
     let mut i = 0;
     if lines.first().is_some_and(|l| l.starts_with("#!")) {
@@ -448,6 +548,11 @@ pub fn parse(src: &str, dir: &Path, lenient: bool) -> (Talk, Vec<Diag>) {
                 "off" | "no" | "false" => calm = false,
                 _ => p.err(col, l.chars().count(), "calm is on or off"),
             },
+            "keys" => match v.as_str() {
+                "on" | "yes" | "true" => keys = Some(true),
+                "off" | "no" | "false" => keys = Some(false),
+                _ => p.err(col, l.chars().count(), "keys is on or off"),
+            },
             _ if spec::find(spec::TALK, k).is_some() => match Rgb::parse(&v) {
                 Some(c) => {
                     p.theme.set(k, c);
@@ -479,7 +584,7 @@ pub fn parse(src: &str, dir: &Path, lenient: bool) -> (Talk, Vec<Diag>) {
         p.n = lines.len().saturating_sub(1);
         p.err(0, 0, "no slides: a slide starts at a line of `---`");
     }
-    let talk = Talk { theme: p.theme.clone(), fx: talk_fx, cursor, calm, slides, dir: dir.to_path_buf(), vars: p.vars.clone(), files: p.files.clone() };
+    let talk = Talk { theme: p.theme.clone(), fx: talk_fx, cursor, calm, keys, slides, dir: dir.to_path_buf(), vars: p.vars.clone(), files: p.files.clone(), live: p.live };
     (talk, p.diags)
 }
 
@@ -520,6 +625,11 @@ fn slide(p: &mut P, lines: &[&str], start: usize, end: usize) -> Slide {
                     Err(e) => p.err(col, l.chars().count(), e),
                 }
             }
+            "keys" => match v.as_str() {
+                "on" | "yes" | "true" => s.keys = Some(true),
+                "off" | "no" | "false" => s.keys = Some(false),
+                _ => p.err(col, l.chars().count(), "keys is on or off"),
+            },
             "cols" => match v.parse() {
                 Ok(n) if n >= 20 => s.cols = Some(n),
                 _ => p.err(col, l.chars().count(), "cols is a number of columns, 20 or more"),
@@ -597,6 +707,8 @@ struct Block {
     focus: Vec<Vec<usize>>,
     /// For a ```poll block, its choices.
     poll: Option<Vec<String>>,
+    /// Which of them is the answer, if one's marked.
+    answer: Option<usize>,
 }
 
 /// A ``` block being read: what its opening line said, where its lines
@@ -876,7 +988,12 @@ fn textual(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
                 p.err(0, 3, "a second poll; a slide has one");
             }
             let id = format!("{}\n{}", s.title(), choices.join("\n"));
-            s.poll = Some(Poll { id, choices, at });
+            // The answer comes out on a step of its own, after the votes.
+            let answer = b.answer.map(|k| {
+                step += 1;
+                (k, step)
+            });
+            s.poll = Some(Poll { id, choices, at, answer });
         }
         // Its output comes in on a step of its own, after the block.
         if let Some(argv) = b.run {
@@ -979,10 +1096,20 @@ fn close(p: &mut P, s: &mut Slide, b: &mut Block, o: Open, opened: usize) {
         p.err(0, 3, "a block from a file has no lines of its own");
     }
     if o.lang == "poll" {
-        let choices: Vec<(usize, String)> = o.src.iter().enumerate().filter(|(_, l)| !l.trim().is_empty()).map(|(k, l)| (o.at + k, l.trim().to_string())).collect();
+        let mut choices: Vec<(usize, String)> = o.src.iter().enumerate().filter(|(_, l)| !l.trim().is_empty()).map(|(k, l)| (o.at + k, l.trim().to_string())).collect();
         if choices.len() < 2 {
             p.n = opened;
             p.err(0, 3, "a poll has two choices or more, a line each");
+        }
+        // A `* ` choice is the answer, kept from the watchers till its step.
+        for (k, (n, c)) in choices.iter_mut().enumerate() {
+            let Some(rest) = c.strip_prefix("* ") else { continue };
+            *c = rest.trim().to_string();
+            if b.answer.is_some() {
+                p.n = *n;
+                p.err(0, 1, "a second answer; a poll has one");
+            }
+            b.answer = Some(k);
         }
         let leads: Vec<Line> = choices
             .iter()
@@ -1007,12 +1134,19 @@ fn close(p: &mut P, s: &mut Slide, b: &mut Block, o: Open, opened: usize) {
             .iter()
             .enumerate()
             .filter(|(_, l)| !l.trim().is_empty())
-            .filter_map(|(k, l)| match chart_line(l) {
-                Some(c) => Some((o.at + k, c)),
-                None => {
-                    p.n = o.at + k;
-                    p.err(0, l.chars().count(), "a chart line is a label, then a number: builds 42");
-                    None
+            .filter_map(|(k, l)| {
+                // A number can be a ${NAME}, so a chart shows what was
+                // measured; one not set has been said already.
+                p.n = o.at + k;
+                let said = p.diags.len();
+                let filled = p.interp(l);
+                match chart_line(&filled) {
+                    Some(c) => Some((o.at + k, c)),
+                    None if p.diags.len() > said => chart_line(&format!("{} 0", l.split("${").next().unwrap_or(""))).map(|c| (o.at + k, c)),
+                    None => {
+                        p.err(0, l.chars().count(), "a chart line is a label, then a number: builds 42");
+                        None
+                    }
                 }
             })
             .collect();
@@ -1048,7 +1182,8 @@ fn close(p: &mut P, s: &mut Slide, b: &mut Block, o: Open, opened: usize) {
 
 /// A slide with a ```graph: drawn, its boxes and arrows laid out from its
 /// lines (`a -> b -> c`, `..>` dotted, `: label` after the last), left to
-/// right or, ```graph down, top to bottom; each `> ` line's on a step;
+/// right or, ```graph down, top to bottom; each `> ` line's on a step, or
+/// with ```graph steps each arrow is, the first box there to start from;
 /// lines after the graph centered under it.
 fn graph(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
     // Each box's name, as written, and title; each arrow's ends, whether
@@ -1060,6 +1195,8 @@ fn graph(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
     // What each step brings: new boxes, arrows (by index), and the line.
     let mut groups: Vec<Vec<(usize, Result<usize, usize>)>> = vec![vec![]];
     let (mut inside, mut seen) = (false, false);
+    // ```graph steps: an arrow a step, with the box it reaches.
+    let mut each = false;
     for i in from..end {
         p.n = i;
         let l = lines[i];
@@ -1075,8 +1212,9 @@ fn graph(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
         if let Some(info) = l.trim_start().strip_prefix("```") {
             if inside {
                 inside = false;
-            } else if matches!(info.trim(), "graph" | "graph right" | "graph down") && !seen {
-                (inside, seen, down) = (true, true, info.trim() == "graph down");
+            } else if let Some(how) = info.trim().strip_prefix("graph").filter(|h| !seen && h.split_whitespace().all(|w| matches!(w, "right" | "down" | "steps"))) {
+                (inside, seen) = (true, true);
+                (down, each) = (how.split_whitespace().any(|w| w == "down"), how.split_whitespace().any(|w| w == "steps"));
             } else {
                 p.err(0, l.chars().count(), "a graph slide has one ```graph, and no other blocks");
             }
@@ -1127,7 +1265,9 @@ fn graph(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
                 }
             }
         }
-        let mut ids = vec![];
+        let (mut ids, mut new) = (vec![], vec![]);
+        // What its step held before this line.
+        let had = groups[g].len();
         for (name, _) in &parts {
             let name = name.trim();
             if name.is_empty() {
@@ -1142,7 +1282,11 @@ fn graph(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
                     let t = p.markup(name, at);
                     names.push(name.to_string());
                     titles.push(t);
-                    groups[g].push((i, Ok(names.len() - 1)));
+                    new.push(names.len() - 1);
+                    // An arrow a step: only the line's first box comes now.
+                    if !each || ids.is_empty() {
+                        groups[g].push((i, Ok(names.len() - 1)));
+                    }
                     names.len() - 1
                 }
             };
@@ -1156,7 +1300,17 @@ fn graph(p: &mut P, s: &mut Slide, lines: &[&str], from: usize, end: usize) {
             }
             let label = if h + 1 == hops { label.clone().unwrap_or_default() } else { vec![] };
             arrows.push((w[0], w[1], *dotted, label));
-            groups[g].push((i, Err(arrows.len() - 1)));
+            if each {
+                // A step of its own, but for a `> ` line's first arrow,
+                // which that line's step brings with the box it's from.
+                if h > 0 || g == 0 || had > 0 {
+                    groups.push(vec![]);
+                }
+                if new.contains(&w[1]) {
+                    groups.last_mut().unwrap().push((i, Ok(w[1])));
+                }
+            }
+            groups.last_mut().unwrap().push((i, Err(arrows.len() - 1)));
         }
     }
     if inside {
@@ -1394,6 +1548,74 @@ mod tests {
         let rows: Vec<String> = t.slides[0].body.iter().map(|b| markup::text(&b.line)).collect();
         // Header, a rule, and the numbers to the right.
         assert_eq!(rows, ["a    n ", "───────", "x     7", "yy   10"]);
+    }
+
+    #[test]
+    fn graph_steps_is_an_arrow_a_step() {
+        let (t, d) = parse("---\n## g\n```graph steps\na -> b -> c\n> d -> b\n```\nunder\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        // a alone, then b, then c, then d with its arrow (and the caption).
+        assert_eq!(t.slides[0].steps(), 3);
+        let (t, _) = parse("---\n## g\n```graph\na -> b -> c\n> d -> b\n```\n", Path::new("."), false);
+        assert_eq!(t.slides[0].steps(), 1);
+    }
+
+    #[test]
+    fn a_chart_number_can_come_from_the_environment() {
+        // Set for this test alone, under a name nothing else reads.
+        unsafe { std::env::set_var("DEQUE_TEST_BUILDS", "42") };
+        let (t, d) = parse("---\n```chart\nclaude  ${DEQUE_TEST_BUILDS}\nhand  21\n```\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        let bars: Vec<f64> = t.slides[0].body.iter().map(|b| b.bar.as_ref().unwrap().frac).collect();
+        assert_eq!(bars, [1.0, 0.5]);
+        // Not set: said once, as the name not being set, and the bar kept.
+        let (t, d) = parse("---\n```chart\nclaude  ${DEQUE_TEST_NOPE}\nhand  21\n```\n", Path::new("."), false);
+        assert_eq!((d.len(), t.slides[0].body.len()), (1, 2), "{d:?}");
+    }
+
+    #[test]
+    fn a_doubled_dollar_is_left_as_written() {
+        let (t, d) = parse("---\n`$${sh: date}` and $${HOME}, ${sh: echo 7}\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(markup::text(&t.slides[0].body[0].line), "${sh: date} and ${HOME}, 7");
+    }
+
+    // What sh runs; cmd, on Windows, wouldn't.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_says_what_it_printed() {
+        let src = "---\nsky: boids ${sh: echo 12} 3\n# ${sh: echo hi}\n${sh: printf 'a\\nb' | awk '{print $1}'} done\n";
+        let (t, d) = parse(src, Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        let s = &t.slides[0];
+        assert_eq!((s.headline.as_deref(), markup::text(&s.body[0].line).as_str(), s.fx.sky.as_deref(), t.live), (Some("hi"), "a b done", Some("boids 12 3"), true));
+        // In the editor it isn't run.
+        let (t, d) = parse("---\n${sh: exit 1} tasks\n", Path::new("."), true);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(markup::text(&t.slides[0].body[0].line), "0 tasks");
+        // An ant colony's said in words, any of them, and a number.
+        let (t, d) = parse("---\nsky: ants ground fire sand 80\n---\nsky: ants\n---\nsky: ants gel leafcutter\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(t.slides[0].fx.sky.as_deref(), Some("ants ground fire sand 80"));
+        let (_, d) = parse("---\nsky: ants farm ground\n---\nsky: ants fier\n", Path::new("."), false);
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(d[1].msg.contains("did you mean \"fire\""), "{d:?}");
+        // One that fails says so, and a sky that takes no number.
+        let (_, d) = parse("---\n${sh: echo no >&2; exit 3}\n---\nsky: life 4\n", Path::new("."), false);
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(d[0].msg.ends_with("failed: no"), "{d:?}");
+    }
+
+    #[test]
+    fn a_poll_answer_is_a_step_and_not_a_choice_of_its_own() {
+        let (t, d) = parse("---\nkeys: on\n# HOW MANY\n```poll\n3\n* 7\n12\n```\n> then this\n", Path::new("."), false);
+        assert!(d.is_empty(), "{d:?}");
+        let s = &t.slides[0];
+        let p = s.poll.clone().unwrap();
+        // The star is gone from what watchers are asked, and from its name.
+        assert_eq!((p.choices, p.answer, s.steps(), s.keys), (vec!["3".to_string(), "7".into(), "12".into()], Some((1, 1)), 2, Some(true)));
+        let (_, d) = parse("---\n```poll\n* a\n* b\n```\n", Path::new("."), false);
+        assert_eq!(d.len(), 1, "{d:?}");
     }
 
     #[test]
