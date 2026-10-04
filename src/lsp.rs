@@ -436,8 +436,8 @@ mod tests {
         let skies = labels("sky: ");
         assert!(["ants", "koi", "sand"].iter().all(|k| skies.iter().any(|s| s == k)));
         // After it, a view, a species and what it's in; said, not again.
-        assert_eq!(labels("sky: ants "), ["farm", "ground", "leafcutter", "black", "fire", "soil", "sand", "gel"]);
-        assert_eq!(labels("sky: ants ground fire "), ["soil", "sand", "gel"]);
+        assert_eq!(labels("sky: ants "), ["farm", "ground", "leafcutter", "black", "fire", "soil", "sand", "gel", "founding", "grown"]);
+        assert_eq!(labels("sky: ants ground fire "), ["soil", "sand", "gel", "founding", "grown"]);
         assert!(labels("sky: stars ").iter().all(|l| l != "ground"));
         let said = |line: &str, col: usize| hover(&At { col, ..at(line) })["contents"]["value"].as_str().unwrap_or("").to_string();
         assert!(said("sky: ants ground fire", 12).starts_with("`sky: ants ground`: the same colony from above"));

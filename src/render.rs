@@ -878,6 +878,7 @@ pub fn help(s: &mut Screen, talk: &Talk, n: usize) {
         ("enter", "run the slide's command"),
         ("B .", "blank the screen"),
         ("v", "sky: ants from above, or from the side"),
+        ("i", "how the ant colony's doing, on the top row"),
         ("w P", "how to watch, your remote (--share)"),
         ("+ −", "the font's size (--tv)"),
         ("q q", "quit"),

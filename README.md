@@ -35,7 +35,7 @@ TALK can be a folder with a `talk.deque` in it, or left out when the folder you'
 
 The mouse is a laser pointer: a red dot with a glow that lights the text under it, a ring where you click, fading when it's still. The terminal's own arrow is hidden where it lets deque.
 
-Keys: `→` `space` `n` next · `←` `b` back · `12⏎` go to 12 · `'` back to where you jumped from · `o` overview (`/` finds a slide by its words or notes) · `r` replay · `B` or `.` blank to the sky, any key back · `v` an ant colony's other view · `?` every key · `q` `q` quit (one `q` could be a slip; `ctrl-c` quits at once)
+Keys: `→` `space` `n` next · `←` `b` back · `12⏎` go to 12 · `'` back to where you jumped from · `o` overview (`/` finds a slide by its words or notes) · `r` replay · `B` or `.` blank to the sky, any key back · `v` an ant colony's other view, `i` how it's doing · `?` every key · `q` `q` quit (one `q` could be a slip; `ctrl-c` quits at once)
 
 Saving the talk reloads it. Starting again, `'` goes back to the slide you left off on. When the window's too small for a slide, deque says so over it rather than cutting it off. `deque demo/talk.deque` shows every feature.
 
@@ -149,15 +149,28 @@ The sky knows what's on the slide. Snow lies a while on the text it lands on; bo
 | `farm` | the colony from the side (the default) |
 | `ground` | the same colony from above |
 | `leafcutter` | rust-brown, with majors, the big ones; they cut leaves (the default) |
-| `black` | garden ants; they take what falls on the ground |
+| `black` | garden ants; they milk aphids, and take what's fallen |
 | `fire` | red, quick, and half as many again |
 | `soil` `sand` `gel` | what the nest is in: brown earth (the default), pale sand, or the blue gel of a see-through farm |
+| `founding` `grown` | a queen alone with her first eggs (the default), or a colony well under way |
 
-It's one colony, seen two ways. From the side, the workers dig the nest as you watch: a shaft down from the entrance, galleries off it, a chamber at the end of each. Every grain is carried up and dropped round the hole, where a mound grows. Foragers bring food to the store: leafcutters cut a piece of leaf from a plant and carry it over their heads to the fungus garden, and the leaves grow back; the others gather what's fallen. While there's food the queen lays; nurses carry her eggs to the nursery, where they turn from egg to larva to pupa and come out pale. The old die where they stand, and are carried to the midden. Dug out, and grown into it, the colony digs another chamber. Text on the slide is stuck on the glass: the nest goes on behind it.
+It's one colony, seen two ways. From the side it's the nest; from above, the same ants, those that are out. `v` goes from one view to the other, and two panes can show both at once: run the same talk in each and press `v` in one. An ant that goes down the hole in one is coming down the shaft in the other.
 
-From above it's the same ants, those that are out. Foragers leave the hole looking for food; one that finds some lays scent on its way home, and the others follow it, so trails form between the nest and the food, and fade when the food's gone. They walk round the words. An ant that goes down the hole is gone from this view; in the other, it's coming down the shaft with what it found. `v` goes from one view to the other.
+It begins with a queen alone at the bottom of the shaft she dug, with her first eggs (`grown` skips to a colony well under way). The first workers come small, and soon. From then it's theirs: they dig the galleries and chambers a grain at a time, each grain carried up and dropped round the door, where a mound grows; they bring in food; she lays while there's food to lay on.
 
-The colony is kept while deque runs: going back to its slide, or looking at it the other way, it's as you left it, however many other skies came between (it waits while it's off the screen). A window resized keeps it too, everything where it was, in proportion.
+**What an ant does goes by what it is and how old.** The smallest (minims) and the young stay in, with the brood and the queen. The middle-aged dig, and carry the dead to the midden. The old go out for food. The biggest (majors) keep watch by the door, and fight. When too few are digging or foraging, whoever's free does that.
+
+**Brood** is carried up to the nursery by day, where it's warm, and down to the queen's chamber at night: eggs, then larvae, then pupae, then pale new ants. **Underground, two that meet stop head to head a moment**, one feeding the other. **A forager that finds plenty goes straight back for more, and leads another to it**, nose to tail; after that the scent does it, and a trail forms, round the words on the slide, and fades when the food's gone.
+
+**Each kind lives its own way.** Leafcutters cut leaf from the plants and carry it home overhead, a minim sometimes riding on the piece; in the nest it's worked into the fungus garden, which is what they eat, and a garden not fed dwindles. Garden ants (`black`) milk the aphids on the plants, and take what's fallen. Fire ants take what's fallen, and all of them fight.
+
+**It has days and nights and seasons**, by a clock of its own: a day is eight minutes, a year sixteen days. By night the foragers stay in, under stars. In late autumn the leaves fall; in winter there's snow, nobody goes out, the queen stops laying, and they cluster round her. **Rain** comes now and then: the door's stopped up against it, the top of the shaft takes in water, the trails wash away, and after it they start again.
+
+**Once a year, in summer, a colony that's grown and fed raises the winged.** They wait in the nest till they're all there and the day's bright; then they come out, and fly.
+
+**It isn't alone.** Twigs fall and lie in the way till they've rotted. A spider comes hunting: it eats a few of those that are out, and goes, unless enough of those that fight bring it down, and then it's food. Across the way is another colony, whose foragers take the same food; where one of theirs meets one of ours they square up, and sometimes one dies.
+
+**For its keeper:** `i` shows how it's doing on the top row: the day, the season and the hour, how many workers of each size, the brood by stage, the food or the fungus, and who's about. The colony is kept on disk (under `~/.deque/colonies`), written every ten seconds, so it's there next time, older; `--fresh` begins it anew. It waits while deque isn't running, or is on a slide without it. A window resized keeps it, everything where it was, in proportion. Text on the slide is stuck on the glass: the nest goes on behind it.
 
 A click drops food, in either. `deque demo/ants.deque --loop` shows every kind, and goes round by itself; `deque demo/antfarm.deque` is a farm and nothing else, for a screen left on.
 

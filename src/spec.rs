@@ -57,23 +57,27 @@ pub const SKY: &[Named] = &[
     ("fireflies", "a few warm lights drifting, now and then lit"),
     ("sand", "sand pouring in, heaping on the text and the floor, and running out when it's deep"),
     ("koi", "a pond: koi swimming under lily pads, light crossing the water; a click scatters food, and they come and eat it"),
-    ("ants", "an ant colony, kept: seen from the side, the nest, dug a grain at a time; from above, the same ants out on the ground, on their trails. After it, any of a view, a species and what it's in, and how many: sky: ants ground fire sand 80. A click drops food; v is the other view"),
+    ("ants", "an ant colony, kept: seen from the side, the nest, dug a grain at a time; from above, the same ants out on the ground, on their trails. After it, any of a view, a species and what it's in, and how many: sky: ants ground fire sand 80. A click drops food; v is the other view; i says how it's doing. It's kept between runs"),
     ("none", "the terminal's own background (the default)"),
 ];
 
 /// What `sky: ants` can say after it, one of each: the view, the species,
 /// and what the nest is in.
-pub const ANTS: [&[Named]; 3] = [
+pub const ANTS: [&[Named]; 4] = [
     &[
-        ("farm", "the colony from the side: a shaft, galleries and chambers, dug as you watch; the queen, her brood, the store, the midden (the default)"),
-        ("ground", "the same colony from above: those that are out, finding food by scent, trails forming round the words"),
+        ("farm", "the colony from the side: a shaft, galleries and chambers, dug as you watch; the queen, her brood, the store, the midden; days and nights, seasons, rain (the default)"),
+        ("ground", "the same colony from above: those that are out, finding food by scent, trails forming round the words and round the twigs that fall; a spider comes hunting now and then"),
     ],
     &[
         ("leafcutter", "rust-brown, with majors: they climb the plants, cut leaf and carry it overhead to the fungus garden (the default)"),
-        ("black", "garden ants: they take what falls on the ground"),
-        ("fire", "red, quick, and more of them"),
+        ("black", "garden ants: they milk the aphids on the plants and take what's fallen, and run from a spider"),
+        ("fire", "red, quick, and more of them; all of them fight a spider"),
     ],
     &[("soil", "brown earth (the default)"), ("sand", "pale sand"), ("gel", "blue gel, as in the farms you can see through")],
+    &[
+        ("founding", "a colony just begun: a queen alone with her first eggs, and everything still to do (the default)"),
+        ("grown", "a colony well under way when the slide comes: workers about, the store dug"),
+    ],
 ];
 
 pub const COLORS: &[Named] = &[

@@ -174,6 +174,9 @@ pub struct Sky {
     /// the talk said of it.
     ants: Option<crate::ants::Colony>,
     seed: u32,
+    /// The colony's link with another deque showing it, looked for when
+    /// it's first needed: none, when no talk's being presented.
+    twin: Option<Option<crate::twin::Twin>>,
     /// The cells with text in them, this frame: what snow and sand lie on
     /// and birds perch on.
     text: Vec<bool>,
@@ -300,6 +303,7 @@ impl Sky {
             said: String::new(),
             ants: None,
             seed,
+            twin: None,
             text: vec![],
             drift: vec![0.0; pw * ph],
             draining: false,
@@ -340,6 +344,11 @@ impl Sky {
     /// one kept put back, to go on from where it was.
     pub fn take_ants(&mut self) -> Option<crate::ants::Colony> {
         self.ants.take()
+    }
+
+    /// How its ant colony's doing, in a line, when it has one.
+    pub fn status(&self) -> Option<String> {
+        self.ants.as_ref().map(|a| a.status())
     }
 
     pub fn give_ants(&mut self, mut a: crate::ants::Colony) {
@@ -475,12 +484,39 @@ impl Sky {
         }
         if self.kind == Kind::Ants {
             let (pw, ph, seed, said, cap) = (self.pw, self.ph, self.seed, self.said.clone(), self.many[0]);
-            let a = self.ants.get_or_insert_with(|| crate::ants::Colony::new(pw, ph, seed, &said, cap));
-            a.view(said.split_whitespace().any(|w| w == "ground"));
+            let colony = said.split_whitespace().filter(|w| *w != "farm" && *w != "ground").collect::<Vec<_>>().join(" ");
+            let a = self.ants.get_or_insert_with(|| {
+                // As it was left last time, if it was kept.
+                let mut c = crate::ants::Colony::new(pw, ph, seed, &said, cap);
+                if let Some(b) = crate::twin::saved(&colony) {
+                    c.restore(&b);
+                    c.cap(cap);
+                }
+                c
+            });
+            let top = said.split_whitespace().any(|w| w == "ground");
+            a.view(top);
             // A click drops food.
             let clicks: Vec<(f64, f64)> = self.ripples.iter().filter(|r| r.2 > self.fed).map(|r| (r.0, r.1)).collect();
             self.fed = self.ripples.iter().fold(self.fed, |m, r| m.max(r.2));
-            a.step(dt, t, &self.text, &clicks);
+            // Another deque showing this talk has the same colony: one of
+            // them keeps it, and the other shows what it's told, and passes
+            // on what's dropped in it.
+            let tw = self.twin.get_or_insert_with(|| crate::twin::Twin::new(&colony));
+            if tw.as_mut().is_some_and(|tw| !tw.owns()) {
+                let (tw, (w, h)) = (tw.as_mut().unwrap(), a.size());
+                tw.follow(a);
+                clicks.iter().for_each(|c| tw.feed(c.0 / w as f64, c.1 / h as f64, top));
+            } else {
+                for (x, y, top) in tw.as_ref().map(|tw| tw.fed()).unwrap_or_default() {
+                    a.feed(x, y, top);
+                }
+                a.step(dt, t, &self.text, &clicks);
+                if let Some(tw) = tw {
+                    tw.publish(a);
+                    tw.save(a);
+                }
+            }
             a.back(&mut self.field, theme);
         }
         if let Some(f) = &self.frost {

@@ -3,13 +3,14 @@
 // made it. Run it: deque demo/ants.deque, or leave it going by itself:
 // deque demo/ants.deque --loop
 //
-// It's one colony seen two ways: slides that say the same ants in the same
+// Most slides say `grown`, a colony well under way; without it, one begins
+// with a queen alone. It's one colony seen two ways: slides that say the same ants in the same
 // soil share it, from the side or from above, and going back to it finds it
 // as it was left. v goes from one view to the other.
 
 ---
 fx: assemble
-sky: ants ground
+sky: ants ground grown
 time: 20s
 
 # ANTS
@@ -18,7 +19,7 @@ time: 20s
 {muted}a colony behind your slides · click to feed it · v for the other view{/}
 
 ---
-sky: ants
+sky: ants grown
 time: 45s
 
 ## the farm
@@ -27,7 +28,7 @@ time: 45s
 {muted}the nest from the side · they dig it as you watch{/}
 
 ---
-sky: ants
+sky: ants grown
 time: 45s
 
 ## who's who
@@ -40,7 +41,7 @@ time: 45s
 ```
 
 ---
-sky: ants
+sky: ants grown
 time: 30s
 
 ## feed them
@@ -49,7 +50,7 @@ time: 30s
 {muted}leafcutters cut their own too, up the plants; the leaves grow back{/}
 
 ---
-sky: ants black sand
+sky: ants black sand grown
 time: 40s
 
 ## black garden ants, in sand
@@ -58,7 +59,7 @@ time: 40s
 {muted}they cut nothing: they take what falls on the ground{/}
 
 ---
-sky: ants fire gel
+sky: ants fire gel grown
 time: 40s
 
 ## fire ants, in gel
@@ -67,7 +68,7 @@ time: 40s
 {muted}red, quick, and half as many again{/}
 
 ---
-sky: ants leafcutter soil 12
+sky: ants leafcutter soil 12 grown
 time: 30s
 
 ## a young colony
@@ -76,7 +77,7 @@ time: 30s
 {muted}the number is how many workers at most; the queen lays up to it{/}
 
 ---
-sky: ants 120
+sky: ants 120 grown
 time: 40s
 
 ## a big one
@@ -84,7 +85,7 @@ time: 40s
 
 ---
 tr: sand
-sky: ants ground
+sky: ants ground grown
 time: 45s
 
 ## from above
@@ -94,15 +95,17 @@ time: 45s
 {muted}the same colony, those that are out · trails form, round the words{/}
 
 ---
-sky: ants ground
+sky: ants ground grown
 time: 30s
 
 ## feed them here too
 # CLICK
-a click is a pile of leaf: watch a trail form to it, and fade when it's gone
+a click is a pile of food: watch a trail form to it, and fade when it's gone
+
+{muted}twigs fall and lie in the way · a spider comes hunting now and then{/}
 
 ---
-sky: ants ground fire sand 150
+sky: ants ground fire sand 150 grown
 time: 45s
 
 ## fire ants, from above
@@ -110,7 +113,7 @@ time: 45s
 `sky: ants ground fire sand 150`
 
 ---
-sky: ants ground black gel 30
+sky: ants ground black gel 30 grown
 time: 40s
 
 ## a few black ants
@@ -120,7 +123,29 @@ time: 40s
 {muted}fed, the nest sends out more{/}
 
 ---
+sky: ants grown
+time: 45s
+
+## its keeper's keys
+```
+{accent}v{/}       the other view of the same colony
+{accent}i{/}       how it's doing: the day, the season, who's about
+{accent}click{/}   drops food
+```
+
+{muted}it's kept between runs · two panes, v in one, show both views at once{/}
+
+---
 sky: ants
+time: 90s
+
+## from the beginning
+`sky: ants`
+
+{muted}a queen alone, and her first eggs · leave it, and come back{/}
+
+---
+sky: ants grown
 time: 60s
 
 ## leave it on

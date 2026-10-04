@@ -1,7 +1,12 @@
 #!/usr/bin/env deque
 // An ant farm and nothing else: a screensaver. Run it: deque demo/antfarm.deque
 //
+// It begins with a queen alone, and it's kept: next time it's the same
+// colony, older. deque demo/antfarm.deque --fresh begins again.
+// i says how it's doing.
+//
 // v is the same colony from above. A click drops food. q q quits.
+// Run it in two panes and press v in one: one colony, both views.
 // Change the line under the --- for other ants: after `sky: ants` go any of
 //   farm, ground · leafcutter, black, fire · soil, sand, gel · how many
 // as in `sky: ants fire sand 90`.

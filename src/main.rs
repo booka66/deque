@@ -30,6 +30,7 @@ mod share;
 mod sky;
 mod spec;
 mod talk;
+mod twin;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
@@ -73,6 +74,8 @@ deque: slides in your terminal
                           the last, the first. What a slide runs is run again
                           each time round, its output turning into the new.
                           For a screen left on
+  --fresh                 its ant colonies (sky: ants) begin anew, not as
+                          they were when deque last ran
   --rehearse              present it as a practice run: when it's over, the
                           time you spent on each slide is written into the
                           talk as its time:, for deque notes to pace you by
@@ -97,7 +100,7 @@ deque: slides in your terminal
 
 keys: → space enter n on · ← b back · 12 enter: slide 12 · ' back from a jump
       o all slides, / to find one · r replay · B blank · v ants, the other
-      view · w how to watch
+      view · i how the ants are doing · w how to watch
       (--share) · home end · q q quit · ? all of them
 the mouse is a laser pointer
 The talk reloads when you save it, and shows the slide you changed.";
@@ -285,7 +288,7 @@ fn present(args: &[String]) -> Result<(), String> {
     let (mut start, mut print, mut tv, mut cursor, mut sharing, mut curl) = (1usize, false, false, None, false, false);
     let mut local = false;
     let mut own_font = true;
-    let (mut calm, mut practice, mut looping) = (false, false, false);
+    let (mut calm, mut practice, mut looping, mut fresh) = (false, false, false, false);
     let (mut cast, mut html, mut size) = (None, None, (100, 30));
     let mut rest = vec![];
     let mut it = args.iter();
@@ -302,6 +305,7 @@ fn present(args: &[String]) -> Result<(), String> {
             "--calm" => calm = true,
             "--rehearse" => practice = true,
             "--loop" => looping = true,
+            "--fresh" => fresh = true,
             "--share-curl" => (sharing, curl) = (true, true),
             "--share-no-font" => (sharing, own_font) = (true, false),
             "--share-local" => (sharing, local) = (true, true),
@@ -395,6 +399,8 @@ fn present(args: &[String]) -> Result<(), String> {
         return Err("deque: presenting needs a terminal (--print writes the slides as text)\n".into());
     }
     let cursor = cursor.unwrap_or(talk.cursor);
+    // Its ant colonies are shared with any other deque presenting it.
+    twin::open(&path, fresh);
 
     let mut s = Screen::new(talk.theme.clone());
     terminal::enable_raw_mode().map_err(|e| e.to_string())?;
@@ -477,6 +483,9 @@ fn present(args: &[String]) -> Result<(), String> {
     let mut minute = minute_now();
     let mut reading: Option<std::sync::mpsc::Receiver<Result<Talk, String>>> = None;
     let mut reread: Option<Talk> = None;
+    // i: how an ant colony's doing, on the top row, said again each second;
+    // what was last said, to write over.
+    let (mut info, mut told, mut said) = (false, Instant::now(), 0usize);
     loop {
         if n != on {
             if let Some(t) = spent.get_mut(on) {
@@ -583,6 +592,14 @@ fn present(args: &[String]) -> Result<(), String> {
                     continue;
                 }
                 s.sky_frame();
+                if info && told.elapsed() >= Duration::from_millis(500) {
+                    told = Instant::now();
+                    let text = s.sky.as_ref().and_then(|k| k.status()).unwrap_or_default();
+                    let wide = text.chars().count();
+                    let line = format!("{text}{}", " ".repeat(said.saturating_sub(wide)));
+                    s.put_str(1, 2, &line, markup::Style::fg(talk.theme.muted));
+                    said = wide;
+                }
                 s.flush();
                 s.steer();
                 // Votes in: the poll's bars grow to them.
@@ -715,6 +732,7 @@ fn present(args: &[String]) -> Result<(), String> {
             // An ant colony the other way: the farm's, from above; the
             // ground's, from the side.
             Act::View => s.other_view = !s.other_view,
+            Act::Info => (info, said) = (!info, 0),
             Act::Blank => render::blank(&mut s, &talk, n, shown),
             Act::Leap => {
                 if let Some(k) = leap {
@@ -846,6 +864,7 @@ enum Act {
     Redraw,
     Fresh,
     View,
+    Info,
     Quit,
     Exit,
     Help,
@@ -871,6 +890,7 @@ fn act(k: KeyEvent) -> Act {
         KeyCode::Char('c') if ctrl => Act::Exit,
         KeyCode::Char('?') => Act::Help,
         KeyCode::Char('v') => Act::View,
+        KeyCode::Char('i') => Act::Info,
         KeyCode::Char('B' | '.') => Act::Blank,
         KeyCode::Char('\'') => Act::Leap,
         KeyCode::Char('q') | KeyCode::Esc => Act::Quit,

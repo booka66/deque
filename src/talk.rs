@@ -450,7 +450,7 @@ impl P<'_> {
         let kind = self.one_of("sky", words.next().unwrap_or(""), col, spec::SKY)?;
         // An ant colony says more: which view, which ants, what they're in.
         if kind == "ants" {
-            let (mut sets, mut n) = ([false; 3], 0);
+            let (mut sets, mut n) = ([false; spec::ANTS.len()], 0);
             for w in words {
                 match spec::ANTS.iter().position(|set| set.iter().any(|(name, _)| *name == w)) {
                     Some(k) if !sets[k] => sets[k] = true,
