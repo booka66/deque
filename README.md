@@ -151,6 +151,8 @@ The sky knows what's on the slide. Snow lies a while on the text it lands on; bo
 | `leafcutter` | rust-brown, with majors, the big ones; they cut leaves (the default) |
 | `black` | garden ants; they milk aphids, and take what's fallen |
 | `fire` | red, quick, and half as many again |
+| `honeypot` | they milk aphids, and keep what they gather in themselves: workers hanging from the store's roof, full |
+| `army` | no nest but a hollow for the night; every evening the whole colony moves on |
 | `soil` `sand` `gel` | what the nest is in: brown earth (the default), pale sand, or the blue gel of a see-through farm |
 | `founding` `grown` | a queen alone with her first eggs (the default), or a colony well under way |
 
@@ -170,7 +172,22 @@ It begins with a queen alone at the bottom of the shaft she dug, with her first 
 
 **It isn't alone.** Twigs fall and lie in the way till they've rotted. A spider comes hunting: it eats a few of those that are out, and goes, unless enough of those that fight bring it down, and then it's food. Across the way is another colony, whose foragers take the same food; where one of theirs meets one of ours they square up, and sometimes one dies.
 
-**For its keeper:** `i` shows how it's doing on the top row: the day, the season and the hour, how many workers of each size, the brood by stage, the food or the fungus, and who's about. The colony is kept on disk (under `~/.deque/colonies`), written every ten seconds, so it's there next time, older; `--fresh` begins it anew. It waits while deque isn't running, or is on a slide without it. A window resized keeps it, everything where it was, in proportion. Text on the slide is stuck on the glass: the nest goes on behind it.
+**A queen has her years**, three or so. When they run out there are no more eggs, and the colony dwindles; when its last worker's gone, a new queen comes down and begins again in the same nest. **Stones** lie in the soil, and tunnels wind round them; plants have roots. **A ladybird** comes for the aphids now and then, till an ant gets there and drives it off. **A seed from a full midden sprouts**, by the door, in the warm half of the year.
+
+**For its keeper:**
+
+| key | |
+|---|---|
+| `i` | how it's doing, on the top row: the day, the season and the hour, how many workers of each size, the brood by stage, the food or the fungus, who's about; and the chambers named |
+| `f`, or a click on an ant | follow one: it's marked, and the top row is its life: what it is, how old, what it's doing, how many trips home. `f` again lets it go |
+| `[` `]` | its time: slower, to stopped; faster, to sixteen times over, for getting through a night or a winter |
+| `H` | what's happened to it: how many workers it's had, day by day, and the last things: chambers dug, spiders, flights, winters, queens |
+| `v` | the other view |
+| a click | food, where it's not on an ant |
+
+The colony is kept on disk (under `~/.deque/colonies`), written every ten seconds, so it's there next time; `--fresh` begins it anew. **It lives on while deque isn't running:** when it's next looked at, the time it was left alone is made up, twenty minutes of it lived through at once and the rest gone by on its clock, and `H` says how long it was.
+
+**Food can stand for tasks.** A second number after `sky: ants` is how many piles of food there are to be, each there, however much is carried off, till the number drops. With a command for it, read again each minute, that's a pile a task: `sky: ants 60 ${sh: gh issue list --assignee @me | wc -l}`. A week with a lot to do is a well-fed colony. A window resized keeps it, everything where it was, in proportion. Text on the slide is stuck on the glass: the nest goes on behind it.
 
 A click drops food, in either. `deque demo/ants.deque --loop` shows every kind, and goes round by itself; `deque demo/antfarm.deque` is a farm and nothing else, for a screen left on.
 

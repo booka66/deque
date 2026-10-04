@@ -100,7 +100,8 @@ deque: slides in your terminal
 
 keys: → space enter n on · ← b back · 12 enter: slide 12 · ' back from a jump
       o all slides, / to find one · r replay · B blank · v ants, the other
-      view · i how the ants are doing · w how to watch
+      view · i how the ants are doing · f follow one · [ ] their time,
+      slower and faster · H what's happened · w how to watch
       (--share) · home end · q q quit · ? all of them
 the mouse is a laser pointer
 The talk reloads when you save it, and shows the slide you changed.";
@@ -594,10 +595,16 @@ fn present(args: &[String]) -> Result<(), String> {
                 s.sky_frame();
                 if info && told.elapsed() >= Duration::from_millis(500) {
                     told = Instant::now();
-                    let text = s.sky.as_ref().and_then(|k| k.status()).unwrap_or_default();
+                    let colony = s.sky.as_mut().and_then(|k| k.colony());
+                    let (text, names) = colony.map(|a| (a.status(), a.labels())).unwrap_or_default();
                     let wide = text.chars().count();
                     let line = format!("{text}{}", " ".repeat(said.saturating_sub(wide)));
-                    s.put_str(1, 2, &line, markup::Style::fg(talk.theme.muted));
+                    let st = markup::Style::fg(talk.theme.muted);
+                    s.put_str(1, 2, &line, st);
+                    // Its chambers, named.
+                    for (row, col, name) in names {
+                        s.put_str(row + 1, col + 1, name, st);
+                    }
                     said = wide;
                 }
                 s.flush();
@@ -733,6 +740,19 @@ fn present(args: &[String]) -> Result<(), String> {
             // ground's, from the side.
             Act::View => s.other_view = !s.other_view,
             Act::Info => (info, said) = (!info, 0),
+            // The ant colony's own keys: f follows an ant, [ and ] slow and
+            // quicken its time.
+            Act::Ants(key) => {
+                if let Some(a) = s.sky.as_mut().and_then(|k| k.colony()) {
+                    a.key(key);
+                }
+                hold = true;
+            }
+            Act::History => {
+                if let Some(lines) = s.sky.as_mut().and_then(|k| k.colony()).map(|a| a.history()) {
+                    render::history(&mut s, &talk, n, &lines);
+                }
+            }
             Act::Blank => render::blank(&mut s, &talk, n, shown),
             Act::Leap => {
                 if let Some(k) = leap {
@@ -865,6 +885,8 @@ enum Act {
     Fresh,
     View,
     Info,
+    Ants(char),
+    History,
     Quit,
     Exit,
     Help,
@@ -891,6 +913,8 @@ fn act(k: KeyEvent) -> Act {
         KeyCode::Char('?') => Act::Help,
         KeyCode::Char('v') => Act::View,
         KeyCode::Char('i') => Act::Info,
+        KeyCode::Char(c @ ('f' | '[' | ']')) => Act::Ants(c),
+        KeyCode::Char('H') => Act::History,
         KeyCode::Char('B' | '.') => Act::Blank,
         KeyCode::Char('\'') => Act::Leap,
         KeyCode::Char('q') | KeyCode::Esc => Act::Quit,

@@ -57,7 +57,7 @@ pub const SKY: &[Named] = &[
     ("fireflies", "a few warm lights drifting, now and then lit"),
     ("sand", "sand pouring in, heaping on the text and the floor, and running out when it's deep"),
     ("koi", "a pond: koi swimming under lily pads, light crossing the water; a click scatters food, and they come and eat it"),
-    ("ants", "an ant colony, kept: seen from the side, the nest, dug a grain at a time; from above, the same ants out on the ground, on their trails. After it, any of a view, a species and what it's in, and how many: sky: ants ground fire sand 80. A click drops food; v is the other view; i says how it's doing. It's kept between runs"),
+    ("ants", "an ant colony, kept: seen from the side, the nest, dug a grain at a time; from above, the same ants out on the ground, on their trails. After it, any of a view, a species and what it's in, and how many: sky: ants ground fire sand 80. A second number is how many piles of food there are to be, each there till the number drops: sky: ants 60 ${sh: gh issue list | wc -l} is a pile a task. A click drops food, or on an ant, follows it; v is the other view; i says how it's doing; H, what's happened. It's kept between runs, and lives on between them"),
     ("none", "the terminal's own background (the default)"),
 ];
 
@@ -72,6 +72,8 @@ pub const ANTS: [&[Named]; 4] = [
         ("leafcutter", "rust-brown, with majors: they climb the plants, cut leaf and carry it overhead to the fungus garden (the default)"),
         ("black", "garden ants: they milk the aphids on the plants and take what's fallen, and run from a spider"),
         ("fire", "red, quick, and more of them; all of them fight a spider"),
+        ("honeypot", "they milk aphids, and keep what they gather in themselves: workers hanging from the store's roof, full"),
+        ("army", "no nest but a hollow for the night: they raid in a column by day, and every evening the whole colony moves on"),
     ],
     &[("soil", "brown earth (the default)"), ("sand", "pale sand"), ("gel", "blue gel, as in the farms you can see through")],
     &[

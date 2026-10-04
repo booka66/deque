@@ -454,7 +454,9 @@ impl P<'_> {
             for w in words {
                 match spec::ANTS.iter().position(|set| set.iter().any(|(name, _)| *name == w)) {
                     Some(k) if !sets[k] => sets[k] = true,
-                    None if w.parse::<usize>().is_ok() && n == 0 => n += 1,
+                    // How many workers at most, then how many piles of
+                    // food there are to be: a pile a task, say.
+                    None if w.parse::<usize>().is_ok() && n < 2 => n += 1,
                     _ => {
                         let all = spec::ANTS.iter().map(|set| spec::names(set)).collect::<Vec<_>>().join("; ");
                         let near = spec::near(w, spec::ANTS.iter().flat_map(|set| set.iter().map(|(name, _)| *name)));

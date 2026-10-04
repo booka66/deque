@@ -3,7 +3,8 @@
 //
 // It begins with a queen alone, and it's kept: next time it's the same
 // colony, older. deque demo/antfarm.deque --fresh begins again.
-// i says how it's doing.
+// i says how it's doing. f follows an ant. [ and ] slow and hurry its time.
+// H is what's happened to it.
 //
 // v is the same colony from above. A click drops food. q q quits.
 // Run it in two panes and press v in one: one colony, both views.

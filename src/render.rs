@@ -865,6 +865,12 @@ fn card(s: &mut Screen, k: &Card, copied: bool) {
     }
 }
 
+/// What's happened to an ant colony, on a card, till a key.
+pub fn history(s: &mut Screen, talk: &Talk, n: usize, lines: &[String]) {
+    let extra = lines.iter().map(|l| ("", l.as_str())).collect();
+    show_card(s, talk, n, Card { title: "the colony so far", url: "", extra, copy: false, table: true });
+}
+
 /// What the keys do, on a card over the slide frosted, till a key.
 pub fn help(s: &mut Screen, talk: &Talk, n: usize) {
     let keys = [
@@ -878,7 +884,10 @@ pub fn help(s: &mut Screen, talk: &Talk, n: usize) {
         ("enter", "run the slide's command"),
         ("B .", "blank the screen"),
         ("v", "sky: ants from above, or from the side"),
-        ("i", "how the ant colony's doing, on the top row"),
+        ("i", "how the ant colony's doing, and its chambers named"),
+        ("f", "follow an ant (or click one); f again lets it go"),
+        ("[ ]", "the colony's time: slower, stopped; faster"),
+        ("H", "what's happened to the colony"),
         ("w P", "how to watch, your remote (--share)"),
         ("+ −", "the font's size (--tv)"),
         ("q q", "quit"),

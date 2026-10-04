@@ -68,6 +68,25 @@ time: 40s
 {muted}red, quick, and half as many again{/}
 
 ---
+sky: ants honeypot sand grown
+time: 40s
+
+## honeypot ants
+`sky: ants honeypot sand`
+
+{muted}their store is themselves: workers hanging from its roof, full{/}
+
+---
+sky: ants army ground grown
+time: 45s
+
+## army ants
+# RAID
+`sky: ants army ground`
+
+{muted}no nest but a hollow for the night · every evening they all move on{/}
+
+---
 sky: ants leafcutter soil 12 grown
 time: 30s
 
@@ -129,7 +148,10 @@ time: 45s
 ## its keeper's keys
 ```
 {accent}v{/}       the other view of the same colony
-{accent}i{/}       how it's doing: the day, the season, who's about
+{accent}i{/}       how it's doing, and the chambers named
+{accent}f{/}       follow one ant (or click it); f again lets it go
+{accent}[ ]{/}     its time: slower, stopped; faster
+{accent}H{/}       what's happened to it
 {accent}click{/}   drops food
 ```
 

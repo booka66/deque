@@ -346,14 +346,16 @@ impl Sky {
         self.ants.take()
     }
 
-    /// How its ant colony's doing, in a line, when it has one.
-    pub fn status(&self) -> Option<String> {
-        self.ants.as_ref().map(|a| a.status())
+    /// Its ant colony, when it has one, for its keeper's keys and for
+    /// saying how it's doing.
+    pub fn colony(&mut self) -> Option<&mut crate::ants::Colony> {
+        self.ants.as_mut()
     }
 
     pub fn give_ants(&mut self, mut a: crate::ants::Colony) {
         a.resize(self.pw, self.ph);
         a.cap(self.many[0]);
+        a.tasks(self.many[1]);
         self.ants = Some(a);
     }
 
@@ -378,6 +380,7 @@ impl Sky {
         self.many = many;
         if let Some(a) = self.ants.as_mut() {
             a.cap(many[0]);
+            a.tasks(many[1]);
         }
         let n = many[0].filter(|_| self.usual() > 0).map_or(self.usual(), |n| n.min(MOST));
         let (fish, n) = if self.kind == Kind::Koi { (n.min(40), 0) } else { (0, n) };
@@ -488,12 +491,16 @@ impl Sky {
             let a = self.ants.get_or_insert_with(|| {
                 // As it was left last time, if it was kept.
                 let mut c = crate::ants::Colony::new(pw, ph, seed, &said, cap);
-                if let Some(b) = crate::twin::saved(&colony) {
-                    c.restore(&b);
+                if let Some(b) = crate::twin::saved(&colony)
+                    && c.restore(&b)
+                {
+                    // It's lived on while deque wasn't running.
                     c.cap(cap);
+                    c.catch_up(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()));
                 }
                 c
             });
+            a.tasks(self.many[1]);
             let top = said.split_whitespace().any(|w| w == "ground");
             a.view(top);
             // A click drops food.
@@ -506,12 +513,21 @@ impl Sky {
             if tw.as_mut().is_some_and(|tw| !tw.owns()) {
                 let (tw, (w, h)) = (tw.as_mut().unwrap(), a.size());
                 tw.follow(a);
-                clicks.iter().for_each(|c| tw.feed(c.0 / w as f64, c.1 / h as f64, top));
+                // A click on an ant follows it, here; elsewhere it's food,
+                // for the keeper to drop.
+                for c in &clicks {
+                    if !a.pick(c.0, c.1) {
+                        tw.feed(c.0 / w as f64, c.1 / h as f64, top);
+                    }
+                }
             } else {
                 for (x, y, top) in tw.as_ref().map(|tw| tw.fed()).unwrap_or_default() {
                     a.feed(x, y, top);
                 }
-                a.step(dt, t, &self.text, &clicks);
+                // As fast as its keeper has its time going.
+                for k in 0..a.speed() {
+                    a.step(dt, t, &self.text, if k == 0 { &clicks } else { &[] });
+                }
                 if let Some(tw) = tw {
                     tw.publish(a);
                     tw.save(a);

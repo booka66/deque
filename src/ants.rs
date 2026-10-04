@@ -20,7 +20,19 @@
 //! underground stop to share food. One that finds plenty leads another
 //! back to it. Once a year, in summer, the winged are raised, and fly.
 //!
-//! The ground has its own life. Rain stops up the door and washes the
+//! A queen has her years, and when she's gone and her last worker with
+//! her, another comes and begins again in the same nest. Honeypot ants
+//! keep their food in workers hanging from the store's roof; army ants dig
+//! nothing, and move on every evening.
+//!
+//! Its keeper can follow one ant, name the chambers, stop its time or
+//! hurry it, and read what's happened to it. It's kept on disk, and lives
+//! through the time deque wasn't running. Piles of food can stand for
+//! tasks: there as long as the task is.
+//!
+//! The ground has its own life. Stones lie in the soil, and tunnels go
+//! round them; a seed from a full midden sprouts. A ladybird comes for the
+//! aphids till an ant drives it off. Rain stops up the door and washes the
 //! trails away. Garden ants milk the aphids on the plants. Another colony
 //! across the way sends its own foragers, and where they meet ours, they
 //! fight. Twigs fall, and lie in the way till
@@ -48,6 +60,8 @@ enum Species {
     Leafcutter,
     Black,
     Fire,
+    Honeypot,
+    Army,
 }
 
 /// What a species looks like and does: its color, how fast it walks,
@@ -66,6 +80,8 @@ fn habit(s: Species) -> Habit {
         Species::Leafcutter => Habit { body: Rgb(176, 84, 44), pace: 9.0, leaf: true, majors: 20, minims: 30 },
         Species::Black => Habit { body: Rgb(34, 32, 38), pace: 10.0, leaf: false, majors: 0, minims: 0 },
         Species::Fire => Habit { body: Rgb(214, 70, 38), pace: 14.0, leaf: false, majors: 12, minims: 20 },
+        Species::Honeypot => Habit { body: Rgb(176, 112, 52), pace: 10.0, leaf: false, majors: 0, minims: 0 },
+        Species::Army => Habit { body: Rgb(150, 74, 34), pace: 13.0, leaf: false, majors: 15, minims: 0 },
     }
 }
 
@@ -90,6 +106,30 @@ const TWIG: Rgb = Rgb(134, 100, 62);
 const SPIDER: Rgb = Rgb(70, 56, 50);
 const APHID: Rgb = Rgb(196, 224, 140);
 const RAIN: Rgb = Rgb(128, 168, 214);
+const HONEY: Rgb = Rgb(236, 172, 58);
+const STONE: Rgb = Rgb(126, 124, 118);
+const LADYBIRD: Rgb = Rgb(222, 44, 34);
+
+/// What's happened to a colony, said: by its number, and how many.
+fn tell(code: u8, n: f64) -> String {
+    let room = |n: f64| ["a tunnel", "the store", "the nursery", "the midden", "the queen's chamber", "another chamber"][(n as usize).min(5)];
+    match code {
+        0 => "a queen founded it".into(),
+        1 => "the first worker hatched".into(),
+        2 => format!("{} was dug", room(n)),
+        3 => "a spider was brought down, and eaten".into(),
+        4 => format!("a spider took {n:.0}"),
+        5 => format!("{n:.0} winged flew"),
+        6 => format!("winter came, {n:.0} strong"),
+        7 => format!("spring: {n:.0} came through the winter"),
+        8 => "the queen died".into(),
+        9 => "a new queen came, and began again".into(),
+        10 if n >= 120.0 => format!("left alone {:.0} hours", n / 60.0),
+        10 => format!("left alone {n:.0} minutes"),
+        11 => "a seed from the midden sprouted".into(),
+        _ => "the colony moved on".into(),
+    }
+}
 
 /// How far a point is from the stretch between two others.
 fn off(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -195,7 +235,7 @@ impl In<'_> {
 }
 
 /// What a snapshot starts with: another, when what's in one changes.
-const SNAPSHOT: f64 = 6.0;
+const SNAPSHOT: f64 = 7.0;
 const ROOMS: [Room; 6] = [Room::None, Room::Store, Room::Nursery, Room::Midden, Room::Queen, Room::Spare];
 const JOBS: [Job; 7] = [Job::Dig, Job::Forage, Job::Nurse, Job::Bury, Job::Rest, Job::Guard, Job::Fly];
 const CASTES: [Caste; 4] = [Caste::Minim, Caste::Media, Caste::Major, Caste::Alate];
@@ -375,6 +415,10 @@ struct Ant {
     rider: bool,
     /// Where it last found plenty, to go back to, and lead another to.
     knows: Option<(f64, f64)>,
+    /// How many times it's brought food home, and when it hatched, by
+    /// the colony's clock.
+    trips: usize,
+    born: f64,
 }
 
 struct Plant {
@@ -384,8 +428,10 @@ struct Plant {
     lean: f64,
     /// Each leaf: how high up, which side, and how much of it is left.
     leaves: Vec<(f64, f64, f64)>,
-    /// Aphids on it, for garden ants to milk.
+    /// Aphids on it, for garden ants to milk; and how much longer a
+    /// ladybird's on it, eating them.
     aphids: f64,
+    bug: f64,
 }
 
 /// One of another colony's, out on the same ground: where, which way,
@@ -488,6 +534,34 @@ pub struct Colony {
     flown: usize,
     /// How long till those underground next stop to share food.
     social: f64,
+    /// The ant its keeper's following, by its number.
+    follow: Option<usize>,
+    /// How fast its time goes, for its keeper: stopped, as it is, or
+    /// several times over.
+    speed: usize,
+    /// What's happened: the day, what, and how many. And how many workers
+    /// there were, four times a day, for a year back.
+    events: Vec<(f64, u8, f64)>,
+    pops: Vec<f64>,
+    sampled: f64,
+    season_was: usize,
+    /// The queen: whether she's alive, how long she's reigned, and how
+    /// long she has.
+    queen: bool,
+    reign: f64,
+    span: f64,
+    /// When it was last written out, in seconds since 1970.
+    stamp: f64,
+    /// Stones in the soil, each where it is and how big: tunnels go round.
+    stones: Vec<(f64, f64, f64, f64)>,
+    /// The piles of food that stand for tasks, by their numbers: there as
+    /// long as the task is.
+    tasks: Vec<usize>,
+    /// Those flown in the flight going on; and for army ants, where
+    /// they're moving to, since when, and the day they last moved.
+    flock: usize,
+    trek: Option<(f64, f64, f64)>,
+    moved: f64,
     /// Eggs, larvae and pupae: the chamber, where in it, and how old.
     brood: Vec<(usize, f64, f64, f64)>,
     text: Vec<bool>,
@@ -519,6 +593,10 @@ impl Colony {
             Species::Black
         } else if has("fire") {
             Species::Fire
+        } else if has("honeypot") {
+            Species::Honeypot
+        } else if has("army") {
+            Species::Army
         } else {
             Species::Leafcutter
         };
@@ -562,6 +640,21 @@ impl Colony {
             wing: 0.0,
             flown: 0,
             social: 1.0,
+            follow: None,
+            speed: 1,
+            events: vec![],
+            pops: vec![],
+            sampled: 0.0,
+            season_was: 0,
+            queen: true,
+            reign: 0.0,
+            span: DAY * YEAR * (2.5 + (seed % 100) as f64 / 100.0),
+            stamp: 0.0,
+            stones: vec![],
+            tasks: vec![],
+            flock: 0,
+            trek: None,
+            moved: -1.0,
             brood: vec![],
             text: vec![],
             count: 0,
@@ -581,6 +674,7 @@ impl Colony {
             true => c.settle(),
             false => c.found(),
         }
+        c.note(0, 0.0);
         c
     }
 
@@ -610,6 +704,133 @@ impl Colony {
     /// trip to a plant, or down the shaft, takes as long on any.
     fn scale(&self) -> f64 {
         ((self.w / 220.0) * (self.h / 128.0)).sqrt().clamp(0.3, 4.0)
+    }
+
+    /// Whether its kind milks aphids.
+    fn milks(&self) -> bool {
+        matches!(self.species, Species::Black | Species::Honeypot)
+    }
+
+    /// Something happened, to be remembered: the last sixty are.
+    fn note(&mut self, code: u8, n: f64) {
+        self.events.push((self.clock / DAY, code, n));
+        if self.events.len() > 60 {
+            self.events.remove(0);
+        }
+    }
+
+    /// As many piles of food as there are tasks, each there as long as
+    /// its task is: more put down, or the last taken up.
+    pub fn tasks(&mut self, n: Option<usize>) {
+        let n = n.unwrap_or(0).min(40);
+        while self.tasks.len() > n {
+            let id = self.tasks.pop().unwrap();
+            self.piles.retain(|p| p.3 != id);
+        }
+        while self.tasks.len() < n {
+            self.count += 1;
+            let at = self.somewhere(26.0 * self.scale());
+            self.piles.push((at.0, at.1, 12.0, self.count));
+            self.tasks.push(self.count);
+        }
+    }
+
+    /// A key its keeper pressed: f follows an ant, or lets it go; [ and ]
+    /// slow its time and quicken it.
+    pub fn key(&mut self, ch: char) {
+        match ch {
+            'f' if self.follow.is_some() => self.follow = None,
+            'f' => {
+                // One that can be seen from here, if there's one.
+                let seen = |a: &Ant| !self.top || matches!(a.loc, Loc::Surface(..));
+                let all: Vec<usize> = self.ants.iter().filter(|a| seen(a)).map(|a| a.id).collect();
+                self.follow = (!all.is_empty()).then(|| all[self.rng.below(all.len() as i32) as usize]);
+            }
+            '[' => self.speed = self.speed.saturating_sub(1),
+            ']' => self.speed = (self.speed + 1).min(3),
+            _ => {}
+        }
+    }
+
+    /// How many moments of its time go by in one of its keeper's.
+    pub fn speed(&self) -> usize {
+        [0, 1, 4, 16][self.speed]
+    }
+
+    /// The ant at a place on the screen, in pixels, taken to follow, if
+    /// there's one there.
+    pub fn pick(&mut self, x: f64, y: f64) -> bool {
+        let near = |a: &Ant| {
+            let at = match (self.top, a.loc) {
+                (true, Loc::Surface(ax, az)) => (ax, az),
+                (true, _) => return f64::MAX,
+                _ => a.at,
+            };
+            (at.0 - x).powi(2) + (at.1 - y * 2.0).powi(2)
+        };
+        let best = self.ants.iter().map(|a| (near(a), a.id)).min_by(|a, b| a.0.total_cmp(&b.0));
+        match best {
+            Some((d, id)) if d < 9.0 => {
+                self.follow = Some(id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// What its chambers are, and where, in cells from the top left, for
+    /// naming them on the screen: from the side only.
+    pub fn labels(&self) -> Vec<(i32, i32, &'static str)> {
+        if self.top {
+            return vec![];
+        }
+        let leaf = habit(self.species).leaf;
+        self.nodes
+            .iter()
+            .filter(|n| n.room != Room::None && n.done())
+            .map(|n| {
+                let name = match n.room {
+                    Room::Store if leaf => "garden",
+                    Room::Store => "store",
+                    Room::Nursery => "nursery",
+                    Room::Midden => "midden",
+                    Room::Queen if self.species == Species::Army => "bivouac",
+                    Room::Queen => "queen",
+                    _ => "chamber",
+                };
+                let c = n.end();
+                (((c.1 - n.ry) / 4.0) as i32, (c.0 / 2.0) as i32 - name.len() as i32 / 2 + 1, name)
+            })
+            .collect()
+    }
+
+    /// What's happened to it, for its keeper: how many workers it's had,
+    /// day by day, drawn small; then the last things, the newest last.
+    pub fn history(&self) -> Vec<String> {
+        const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let most = self.pops.iter().copied().fold(1.0, f64::max);
+        let graph: String = self.pops.iter().map(|p| BARS[((p / most * 7.0).round() as usize).min(7)]).collect();
+        let mut out = vec![format!("workers, the last {} days: most {most:.0}", self.pops.len().div_ceil(4)), graph, String::new()];
+        out.extend(self.events.iter().rev().take(14).rev().map(|(day, code, n)| format!("day {:>3}  {}", *day as usize + 1, tell(*code, *n))));
+        out
+    }
+
+    /// The time it was away made up: as much of it lived through, quickly,
+    /// as a moment allows, and the rest only gone by on its clock.
+    pub fn catch_up(&mut self, now: f64) {
+        let away = now - self.stamp;
+        if self.stamp <= 0.0 || away < 30.0 {
+            return;
+        }
+        let lived = away.min(1200.0);
+        let mut t = 0.0;
+        while t < lived {
+            self.step(0.1, t, &[], &[]);
+            t += 0.1;
+        }
+        self.clock += (away - lived).min(DAY * YEAR * 20.0);
+        self.season_was = self.season();
+        self.note(10, away / 60.0);
     }
 
     /// The hour of the colony's day, 0 to 24.
@@ -647,6 +868,35 @@ impl Colony {
 
     /// How the colony's doing, in a line, for its keeper.
     pub fn status(&self) -> String {
+        // The ant being followed, if one is: its life in a line.
+        if let Some(a) = self.follow.and_then(|id| self.ants.iter().find(|a| a.id == id)) {
+            let what = match (a.job, a.carry) {
+                _ if a.greet > 0.0 && matches!(a.loc, Loc::Surface(..)) => "in a fight",
+                _ if a.greet > 0.0 => "sharing food",
+                (_, Carry::Leaf) => "carrying leaf home",
+                (_, Carry::Food) => "carrying food home",
+                (_, Carry::Grain) => "carrying out a grain",
+                (_, Carry::Egg(_)) => "carrying brood",
+                (_, Carry::Dead) => "carrying off the dead",
+                (Job::Dig, _) => "digging",
+                (Job::Forage, _) if matches!(a.goal, Goal::Follow(_)) => "following another to food",
+                (Job::Forage, _) if a.wait > 0.0 => "at a plant",
+                (Job::Forage, _) => "out looking for food",
+                (Job::Nurse, _) => "tending brood",
+                (Job::Bury, _) => "going for the dead",
+                (Job::Guard, _) => "on watch",
+                (Job::Fly, _) => "waiting to fly",
+                (Job::Rest, _) => "resting",
+            };
+            let kind = match a.caste {
+                Caste::Minim => "a minim",
+                Caste::Media => "a worker",
+                Caste::Major => "a major",
+                Caste::Alate => "winged",
+            };
+            let days = (self.clock - a.born) / DAY;
+            return format!("ant {} · {kind} · {days:.1} days old, of {:.1} · {what} · {} trips home", a.id, a.life / DAY, a.trips);
+        }
         let h = self.hour();
         let stage = |lo: f64, hi: f64| self.brood.iter().filter(|b| b.3 >= lo && b.3 < hi).count();
         let mut s = format!("day {} · {} · {:02}:{:02}", (self.clock / DAY) as usize + 1, SEASONS[self.season()], h as usize, (h.fract() * 60.0) as usize);
@@ -674,6 +924,14 @@ impl Colony {
         }
         if !self.rivals.is_empty() {
             s += &format!(" · {} rivals", self.rivals.len());
+        }
+        if !self.queen {
+            s += " · no queen";
+        }
+        match self.speed() {
+            0 => s += " · stopped",
+            1 => {}
+            n => s += &format!(" · ×{n}"),
         }
         s
     }
@@ -723,6 +981,11 @@ impl Colony {
         for r in &mut self.rivals {
             (r.x, r.z) = on(r.x, r.z);
         }
+        for t in &mut self.stones {
+            let at = under((t.0, t.1));
+            *t = (at.0, at.1, t.2 * sx, t.3 * sy);
+        }
+        self.trek = self.trek.map(|t| (on(t.0, t.1).0, on(t.0, t.1).1, t.2));
         self.camp = on(self.camp.0, self.camp.1);
         for d in &mut self.dead {
             d.0 = moved(d.0);
@@ -761,6 +1024,10 @@ impl Colony {
         let mut o = Out(vec![]);
         o.all([SNAPSHOT, self.pw as f64, self.ph as f64, self.stock, self.refuse as f64, self.lay, self.count as f64, self.nest.0, self.nest.1]);
         o.all([self.leaf, self.flew, self.raise as f64, self.flown as f64, self.camp.0, self.camp.1, self.muster]);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let trek = self.trek.unwrap_or((0.0, 0.0, 0.0));
+        o.all([self.reign, self.queen as u8 as f64, self.span, now, self.season_was as f64, self.flock as f64, self.moved]);
+        o.all([self.trek.is_some() as u8 as f64, trek.0, trek.1, trek.2]);
         o.n(self.nodes.len() as f64);
         for n in &self.nodes {
             o.all([n.parent as f64, ROOMS.iter().position(|r| *r == n.room).unwrap() as f64, n.rx, n.ry, n.open, n.dug, n.path.len() as f64]);
@@ -793,11 +1060,11 @@ impl Colony {
             o.all([JOBS.iter().position(|j| *j == a.job).unwrap() as f64, a.stage as f64, a.aim.min(1 << 40) as f64, a.wait, a.rest, a.to.0, a.to.1]);
             o.all([a.dir.0, a.dir.1, a.heading, a.scent, a.dodge, a.age, a.life, CASTES.iter().position(|c| *c == a.caste).unwrap() as f64, a.side, a.ph]);
             let knows = a.knows.unwrap_or((0.0, 0.0));
-            o.all([a.id as f64, a.greet, a.met, a.rider as u8 as f64, a.knows.is_some() as u8 as f64, knows.0, knows.1]);
+            o.all([a.id as f64, a.greet, a.met, a.rider as u8 as f64, a.knows.is_some() as u8 as f64, knows.0, knows.1, a.trips as f64, a.born]);
         }
         o.n(self.plants.len() as f64);
         for p in &self.plants {
-            o.all([p.x, p.z, p.h, p.lean, p.aphids, p.leaves.len() as f64]);
+            o.all([p.x, p.z, p.h, p.lean, p.aphids, p.bug, p.leaves.len() as f64]);
             p.leaves.iter().for_each(|l| o.all([l.0, l.1, l.2]));
         }
         o.n(self.piles.len() as f64);
@@ -818,6 +1085,14 @@ impl Colony {
         o.all([self.clock, self.rain, self.cloud, self.plug]);
         o.n(self.rivals.len() as f64);
         self.rivals.iter().for_each(|r| o.all([r.x, r.z, r.dir, r.has as u8 as f64, r.grip]));
+        o.n(self.stones.len() as f64);
+        self.stones.iter().for_each(|t| o.all([t.0, t.1, t.2, t.3]));
+        o.n(self.events.len() as f64);
+        self.events.iter().for_each(|e| o.all([e.0, e.1 as f64, e.2]));
+        o.n(self.pops.len() as f64);
+        self.pops.iter().for_each(|v| o.n(*v));
+        o.n(self.tasks.len() as f64);
+        self.tasks.iter().for_each(|v| o.n(*v as f64));
         o.0.extend(&self.shown);
         o.0
     }
@@ -838,6 +1113,8 @@ impl Colony {
             return None;
         }
         let [leaf, flew, raise, flown, cx, cz, muster] = i.all()?;
+        let [reign, queen, span, stamp, season_was, flock, moved] = i.all()?;
+        let [trekking, tx, tz, since] = i.all()?;
         let many = i.u(64)?;
         let mut nodes = vec![];
         for _ in 0..many {
@@ -875,7 +1152,7 @@ impl Colony {
             let carry = [Carry::None, Carry::Grain, Carry::Food, Carry::Leaf, Carry::Egg(cv), Carry::Dead].get(c as usize).copied()?;
             let [job, stage, aim, wait, rest, tx, ty] = i.all()?;
             let [dx, dy, heading, scent, dodge, age, life, caste, side, ph] = i.all()?;
-            let [id, greet, met, rider, known, kx, kz] = i.all()?;
+            let [id, greet, met, rider, known, kx, kz, trips, born] = i.all()?;
             ants.push(Ant {
                 loc,
                 goal,
@@ -902,13 +1179,15 @@ impl Colony {
                 met,
                 rider: rider != 0.0,
                 knows: (known != 0.0).then_some((kx, kz)),
+                trips: trips as usize,
+                born,
             });
         }
         let mut plants = vec![];
         for _ in 0..i.u(64)? {
-            let [x, z, h, lean, aphids, leaves] = i.all()?;
+            let [x, z, h, lean, aphids, bug, leaves] = i.all()?;
             let leaves = (0..(leaves as usize).min(64)).map(|_| i.all().map(|[a, b, c]| (a, b, c))).collect::<Option<Vec<_>>>()?;
-            plants.push(Plant { x, z, h: h.max(1.0), lean, leaves, aphids });
+            plants.push(Plant { x, z, h: h.max(1.0), lean, leaves, aphids, bug });
         }
         // What it says of a plant, a leaf or a tunnel has to be there.
         for a in &mut ants {
@@ -938,6 +1217,10 @@ impl Colony {
         let hunter = (about != 0.0).then_some(Spider { x, z, dir, hp, fed: fed as usize, bite, stay });
         let [clock, rain, cloud, plug] = i.all()?;
         let rivals = (0..i.u(4096)?).map(|_| i.all().map(|[x, z, dir, has, grip]| Rival { x, z, dir, has: has != 0.0, grip })).collect::<Option<Vec<_>>>()?;
+        let stones = (0..i.u(256)?).map(|_| i.all().map(|[x, y, rx, ry]| (x, y, rx, ry))).collect::<Option<Vec<_>>>()?;
+        let events = (0..i.u(256)?).map(|_| i.all().map(|[day, code, n]| (day, code as u8, n))).collect::<Option<Vec<_>>>()?;
+        let pops = (0..i.u(4096)?).map(|_| i.n()).collect::<Option<Vec<_>>>()?;
+        let tasks = (0..i.u(256)?).map(|_| i.n().map(|v| v as usize)).collect::<Option<Vec<_>>>()?;
         if i.0.len() != pw * ph {
             return None;
         }
@@ -948,6 +1231,9 @@ impl Colony {
         (self.stock, self.refuse, self.lay, self.count, self.nest) = (stock, refuse as usize, lay, count as usize, (nx, nz));
         (self.twigs, self.hunter, self.rivals) = (twigs, hunter, rivals);
         (self.leaf, self.flew, self.raise, self.flown, self.camp, self.muster) = (leaf, flew, raise as usize, flown as usize, (cx, cz), muster);
+        (self.reign, self.queen, self.span, self.stamp, self.season_was, self.flock, self.moved) = (reign, queen != 0.0, span.max(DAY), stamp, (season_was as usize).min(3), flock as usize, moved);
+        self.trek = (trekking != 0.0).then_some((tx, tz, since));
+        (self.stones, self.events, self.pops, self.tasks) = (stones, events, pops, tasks);
         (self.clock, self.rain, self.cloud, self.plug) = (clock.max(0.0), rain, cloud, plug.clamp(0.0, 1.0));
         (self.pw, self.ph, self.w, self.h) = (pw, ph, pw as f64, ph as f64 * 2.0);
         self.gy = (self.h * 0.26).round();
@@ -1016,7 +1302,15 @@ impl Colony {
         let (rx, ry) = (8.0 + 5.0 * self.r(), 3.6 + 1.8 * self.r());
         // Kept in the soil, however small the screen.
         let to = ((at.0 + side * reach).min(self.w - rx - 3.0).max(rx + 3.0), (at.1 + 5.0 * (self.r() - 0.3)).min(self.h - ry - 3.0).max(self.gy + 8.0));
-        let path = self.course(at, to);
+        // Round the stones, if a few tries can find a way.
+        let mut path = self.course(at, to);
+        for _ in 0..8 {
+            let hits = |p: &(f64, f64)| self.stones.iter().any(|s| ((p.0 - s.0) / (s.2 + BORE)).powi(2) + ((p.1 - s.1) / (s.3 + BORE)).powi(2) < 1.0);
+            if !path.iter().any(hits) {
+                break;
+            }
+            path = self.course(at, to);
+        }
         self.nodes.push(Tunnel::new(from, path, room, rx, ry));
     }
 
@@ -1028,6 +1322,14 @@ impl Colony {
         // mostly isn't.
         self.nest = (self.w * (0.3 + 0.4 * self.r()), self.h * (0.7 + 0.16 * self.r()));
         self.nodes.push(Tunnel::new(0, vec![(self.nest.0, self.gy)], Room::None, 0.0, 0.0));
+        // Army ants dig nothing: a hollow just under the ground, for the
+        // night, is all their nest.
+        if self.species == Species::Army {
+            let to = (self.nest.0, (self.gy + 9.0).min(self.h - 7.0));
+            let path = self.course((self.nest.0, self.gy), to);
+            self.nodes.push(Tunnel::new(0, path, Room::Queen, 14.0, 4.5));
+            return;
+        }
         let deep = self.h - self.gy;
         let levels = ((deep / 16.0) as usize).clamp(2, 5);
         let drop = (deep - 6.0) / levels as f64;
@@ -1046,6 +1348,27 @@ impl Colony {
                 side = -side;
             }
         }
+        // Stones in the soil, where no tunnel's to go: the nest winds
+        // between them.
+        for _ in 0..40 {
+            if self.stones.len() >= (self.pw * self.ph / 2600).clamp(2, 9) {
+                break;
+            }
+            let (rx, ry) = (4.0 + 6.0 * self.r(), 2.5 + 2.5 * self.r());
+            let at = (rx + (self.w - 2.0 * rx).max(1.0) * self.r(), self.gy + 6.0 + (self.h - self.gy - 10.0).max(1.0) * self.r());
+            if !self.stony(at, rx, ry) && !self.stones.iter().any(|s| (s.0 - at.0).abs() < s.2 + rx + 3.0 && (s.1 - at.1).abs() < s.3 + ry + 3.0) {
+                self.stones.push((at.0, at.1, rx, ry));
+            }
+        }
+    }
+
+    /// Whether a stone of this size, here, would be in the way of the
+    /// nest as it's planned: on a tunnel, or in a chamber.
+    fn stony(&self, at: (f64, f64), rx: f64, ry: f64) -> bool {
+        self.nodes.iter().any(|n| {
+            let near = |p: &(f64, f64), wide: f64, tall: f64| ((p.0 - at.0) / (rx + wide)).powi(2) + ((p.1 - at.1) / (ry + tall)).powi(2) < 1.0;
+            n.path.iter().any(|p| near(p, BORE + 2.0, BORE + 2.0)) || (n.room != Room::None && near(&n.end(), n.rx + 2.0, n.ry + 2.0))
+        })
     }
 
     /// A new ant at a place, `age` of the way through its life. The first
@@ -1087,6 +1410,8 @@ impl Colony {
             met: 0.0,
             rider: false,
             knows: None,
+            trips: 0,
+            born: self.clock - age * life,
         }
     }
 
@@ -1149,6 +1474,7 @@ impl Colony {
             self.count += 1;
             self.piles.push((s.x.clamp(1.0, self.w - 2.0), s.z.clamp(1.0, self.h - 2.0), 14.0, self.count));
             self.prowl = gone();
+            self.note(3, 0.0);
             return;
         }
         let leaving = s.stay <= 0.0 || s.fed >= 3;
@@ -1175,6 +1501,9 @@ impl Colony {
         }
         if s.x < -3.0 || s.z < -3.0 || s.x > self.w + 3.0 || s.z > self.h + 3.0 {
             self.prowl = gone();
+            if s.fed > 0 {
+                self.note(4, s.fed as f64);
+            }
             return;
         }
         // Not leaving, it keeps to the ground.
@@ -1210,8 +1539,8 @@ impl Colony {
             let n = ((h / 5.0) as usize).clamp(2, 6);
             let leaves = (0..n).map(|k| (h * (0.35 + 0.65 * (k + 1) as f64 / n as f64), if k % 2 == 0 { 1.0 } else { -1.0 }, 1.0)).collect();
             let lean = (self.r() - 0.5) * 0.5;
-            let aphids = if self.species == Species::Black { 6.0 } else { 0.0 };
-            self.plants.push(Plant { x, z, h, lean, leaves, aphids });
+            let aphids = if self.milks() { 6.0 } else { 0.0 };
+            self.plants.push(Plant { x, z, h, lean, leaves, aphids, bug: 0.0 });
         }
         // A twig lying about already, part rotted.
         self.twig();
@@ -1380,6 +1709,43 @@ impl Colony {
         }
     }
 
+    /// Army ants on the move. Toward evening, once a day, the whole colony
+    /// leaves its hollow and goes in a column to another place; when most
+    /// of them are there, or it's taken long enough, that's the nest.
+    fn march(&mut self, dt: f64) {
+        if self.species != Species::Army {
+            return;
+        }
+        let day = (self.clock / DAY).floor();
+        if self.trek.is_none() && day > self.moved && self.hour() >= 17.5 && self.hour() < 19.0 && self.rain <= 0.0 && self.ants.len() >= 6 {
+            let to = self.somewhere(45.0 * self.scale());
+            self.trek = Some((to.0, to.1, 0.0));
+        }
+        let Some((x, z, since)) = self.trek else { return };
+        self.trek = Some((x, z, since + dt));
+        let there = self.ants.iter().filter(|a| matches!(a.loc, Loc::Surface(ax, az) if (ax - x).powi(2) + (az - z).powi(2) < 64.0)).count();
+        if there * 5 < self.ants.len() * 4 && since < 70.0 {
+            return;
+        }
+        // There: the hollow's here now, everyone in it or by it.
+        let dx = x - self.nest.0;
+        for n in &mut self.nodes {
+            n.path.iter_mut().for_each(|p| p.0 += dx);
+        }
+        self.nest = (x, z);
+        self.mound.fill(0.0);
+        self.carve();
+        for a in &mut self.ants {
+            if !matches!(a.loc, Loc::Surface(..) | Loc::Air(..)) {
+                a.loc = Loc::Surface(x, z);
+            }
+            a.goal = Goal::Seek;
+        }
+        (self.trek, self.moved) = (None, day);
+        self.scent.fill(0.0);
+        self.note(12, 0.0);
+    }
+
     /// Whether it's the day to fly: they're all raised, and it's bright
     /// and dry.
     fn launch(&self) -> bool {
@@ -1502,7 +1868,7 @@ impl Colony {
     fn food(&self, x: f64, z: f64, reach: f64) -> Option<(Found, f64, f64)> {
         let leaf = habit(self.species).leaf;
         // Garden ants go to a plant for its aphids.
-        let milk = self.species == Species::Black;
+        let milk = self.milks();
         let plants = self.plants.iter().enumerate().filter(|(_, p)| (leaf && p.leaves.iter().any(|l| l.2 > 0.3)) || (milk && p.aphids >= 1.0)).map(|(k, p)| (Found::Plant(k), p.x, p.z));
         let piles = self.piles.iter().filter(|p| p.2 > 0.0).map(|p| (Found::Pile(p.3), p.0, p.1));
         let far = |f: &(Found, f64, f64)| (f.1 - x).powi(2) + (f.2 - z).powi(2);
@@ -1819,6 +2185,8 @@ impl Colony {
                         true => (0..leaves.len()).find(|&l| leaves[l].2 > 0.3),
                         false => (self.plants[p].aphids >= 1.0 && !leaves.is_empty()).then(|| a.id % leaves.len()),
                     };
+                    // An ant at the plant: the ladybird's off.
+                    self.plants[p].bug = 0.0;
                     match at {
                         Some(l) => (a.wait, a.stage, a.aim) = (1.0 + self.r(), 1, l),
                         None => a.found = None,
@@ -1841,6 +2209,7 @@ impl Colony {
                     Carry::Leaf => self.leaf += 1.0,
                     _ => self.stock += 1.0,
                 }
+                a.trips += 1;
                 let knows = a.knows;
                 self.assign(a);
                 // Straight back for more, with another in tow.
@@ -1910,6 +2279,10 @@ impl Colony {
                 } else {
                     n.open = (n.open + 1.2 / (n.rx * n.ry)).min(1.0);
                 }
+                if n.done() && n.room != Room::None {
+                    let which = ROOMS.iter().position(|r| *r == n.room).unwrap();
+                    self.note(2, which as f64);
+                }
                 self.carve();
                 // Out, and a little way from the hole, any way round it.
                 let (ang, out) = (TAU * self.r(), 4.0 + 7.0 * self.r());
@@ -1938,6 +2311,15 @@ impl Colony {
 
     fn live(&mut self, a: &mut Ant, dt: f64) {
         a.age += dt;
+        // Army ants moving: everyone goes where the colony's going.
+        if let Some((x, z, _)) = self.trek
+            && !matches!(a.goal, Goal::Point(gx, gz) if (gx, gz) == (x, z))
+        {
+            (a.job, a.goal, a.stage, a.wait) = (Job::Guard, Goal::Point(x, z), 0, 0.0);
+            if let Loc::Room(n, ..) = a.loc {
+                a.loc = Loc::Edge(n, self.nodes[n].len);
+            }
+        }
         // Night, winter or rain coming on: those out looking come home.
         if a.goal == Goal::Seek && !self.abroad() {
             let n = self.room(Room::Queen).unwrap();
@@ -1998,8 +2380,11 @@ impl Colony {
         }
         self.clock += dt;
         let winter = self.season() == 3;
+        // A click on an ant follows it; anywhere else, drops food.
         for &(x, y) in clicks {
-            self.feed(x / self.w, y * 2.0 / self.h, self.top);
+            if !self.pick(x, y) {
+                self.feed(x / self.w, y * 2.0 / self.h, self.top);
+            }
         }
         // Those that cut no leaves find what's fallen: there's always a
         // pile or two somewhere.
@@ -2036,9 +2421,69 @@ impl Colony {
             }
         }
         // Aphids breed on a plant in leaf.
-        if self.species == Species::Black {
-            self.plants.iter_mut().for_each(|p| p.aphids = if bare { 0.0 } else { (p.aphids + dt / 9.0).min(6.0) });
+        // A ladybird comes for them now and then, and stays till it's
+        // driven off, or has had enough.
+        if self.milks() {
+            for k in 0..self.plants.len() {
+                let come = self.plants[k].bug <= 0.0 && self.plants[k].aphids >= 3.0 && self.r() < dt / 150.0;
+                let p = &mut self.plants[k];
+                p.bug = if come { 40.0 } else { (p.bug - dt).max(0.0) };
+                p.aphids = if bare { 0.0 } else { (p.aphids + if p.bug > 0.0 { -dt / 2.5 } else { dt / 9.0 }).clamp(0.0, 6.0) };
+            }
         }
+        // Tasks' piles never run out; a seed from a full midden sprouts,
+        // in the warm half of the year, near the door.
+        for p in self.piles.iter_mut().filter(|p| self.tasks.contains(&p.3)) {
+            p.2 = p.2.max(6.0);
+        }
+        if self.refuse >= 12 && self.plants.len() < 5 && self.season() < 2 && self.r() < dt / 60.0 {
+            self.refuse -= 10;
+            let (ang, out) = (TAU * self.r(), (20.0 + 15.0 * self.r()) * self.scale());
+            let (x, z) = ((self.nest.0 + out * ang.cos()).min(self.w - 6.0).max(6.0), (self.nest.1 + out * ang.sin()).min(self.h - 6.0).max(6.0));
+            let h = self.gy * (0.5 + 0.3 * self.r());
+            let leaves = (0..4).map(|k| (h * (0.35 + 0.65 * (k + 1) as f64 / 4.0), if k % 2 == 0 { 1.0 } else { -1.0 }, 0.05)).collect();
+            self.plants.push(Plant { x, z, h, lean: 0.0, leaves, aphids: 0.0, bug: 0.0 });
+            self.note(11, 0.0);
+        }
+        // How many there are, four times a day; the seasons turning; the
+        // queen's years.
+        if self.clock - self.sampled >= DAY / 4.0 {
+            self.sampled = self.clock;
+            self.pops.push(self.ants.len() as f64);
+            if self.pops.len() > 64 {
+                self.pops.remove(0);
+            }
+        }
+        if self.season() != self.season_was {
+            self.season_was = self.season();
+            match self.season_was {
+                3 => self.note(6, self.ants.len() as f64),
+                0 => self.note(7, self.ants.len() as f64),
+                _ => {}
+            }
+        }
+        self.reign += dt;
+        if self.queen && self.reign > self.span {
+            self.queen = false;
+            self.note(8, 0.0);
+        }
+        // Nobody left, and nothing to hatch: one of those that flew comes
+        // down here, and it begins again.
+        if self.ants.is_empty() && self.brood.is_empty() && (!self.queen || self.stock < 1.0) {
+            if !self.queen {
+                self.note(9, 0.0);
+            }
+            (self.queen, self.reign, self.stock) = (true, 0.0, 9.0);
+            let q = self.room(Room::Queen).unwrap();
+            for k in 0..6 {
+                let egg = (q, 6.0 * (self.r() - 0.5), 1.0 + self.r(), HATCH - 12.0 - 9.0 * k as f64);
+                self.brood.push(egg);
+            }
+        }
+        if self.follow.is_some_and(|id| !self.ants.iter().any(|a| a.id == id)) {
+            self.follow = None;
+        }
+        self.march(dt);
         // Leaf brought in is worked into the garden, which is what they
         // eat; and a garden not fed dwindles.
         if habit(self.species).leaf {
@@ -2094,7 +2539,7 @@ impl Colony {
         let queen = self.room(Room::Queen).unwrap();
         // An egg on its way to the nursery is still one to come.
         let carried = self.ants.iter().filter(|a| matches!(a.carry, Carry::Egg(_))).count();
-        if self.lay <= 0.0 && self.stock >= 1.0 && self.ants.len() + self.brood.len() + carried < self.cap {
+        if self.queen && self.lay <= 0.0 && self.stock >= 1.0 && self.ants.len() + self.brood.len() + carried < self.cap {
             self.lay = 7.0 + 5.0 * self.r();
             self.stock -= 1.0;
             let egg = (queen, 4.0 + 3.0 * self.r(), 1.0 + self.r(), 0.0);
@@ -2110,6 +2555,9 @@ impl Colony {
             }
             let mut a = self.hatch(Loc::Room(b.0, b.1, b.2), 0.0);
             (a.goal, a.rest) = (Goal::Spot(b.0, self.nodes[b.0].len), 12.0);
+            if self.ants.is_empty() && !self.events.iter().rev().take_while(|e| e.1 != 0 && e.1 != 9).any(|e| e.1 == 1) {
+                self.note(1, 0.0);
+            }
             self.ants.push(a);
         }
         for i in 0..self.ants.len() {
@@ -2129,7 +2577,7 @@ impl Colony {
         for a in std::mem::take(&mut self.ants) {
             if let Loc::Air(_, _, up) = a.loc {
                 match up > self.gy + 4.0 {
-                    true => self.flown += 1,
+                    true => (self.flown, self.flock) = (self.flown + 1, self.flock + 1),
                     false => self.ants.push(a),
                 }
                 continue;
@@ -2153,12 +2601,17 @@ impl Colony {
         }
         self.twigs.iter_mut().for_each(|t| t.left -= dt / 200.0);
         self.twigs.retain(|t| t.left > 0.0);
+        // The last of a flight gone: that's the flight.
+        if self.flock > 0 && self.raise == 0 && !self.ants.iter().any(|a| a.caste == Caste::Alate) {
+            self.note(5, self.flock as f64);
+            self.flock = 0;
+        }
         self.hunt(dt);
         self.feud(dt);
         self.swarm(dt);
         // All dug, and the colony grown into it: another chamber, off one
         // of the bends.
-        if self.site().is_none() && self.nodes.len() < 14 && self.ants.len() * 5 >= self.cap * 3 {
+        if self.site().is_none() && self.nodes.len() < 14 && self.ants.len() * 5 >= self.cap * 3 && self.species != Species::Army {
             let bends: Vec<usize> = (1..self.nodes.len()).filter(|&i| self.nodes[i].room == Room::None).collect();
             let from = bends[self.rng.below(bends.len() as i32) as usize];
             self.gallery(from, Room::Spare, None);
@@ -2220,6 +2673,14 @@ impl Colony {
                         // In the rain the top of the shaft has water in it.
                         return if wet && deep < 9.0 { void.mix(RAIN, 0.4) } else { void };
                     }
+                    // A stone; or a root, going down from a plant.
+                    let at = (x as f64 + 0.5, y as f64 * 2.0 + 1.0);
+                    if let Some(st) = self.stones.iter().find(|s| ((at.0 - s.0) / s.2).powi(2) + ((at.1 - s.1) / s.3).powi(2) < 1.0) {
+                        return th.bg.mix(if at.1 < st.1 - st.3 * 0.3 { STONE.mix(BROOD, 0.25) } else { STONE }, 0.7);
+                    }
+                    if self.plants.iter().any(|p| deep < p.h * 0.7 && (at.0 - p.x - 2.5 * (deep * 0.35 + p.x).sin()).abs() < 0.8) {
+                        return th.bg.mix(b.mix(Rgb(0, 0, 0), 0.35), much);
+                    }
                     // Streaks of the darker tone, each a cell deep and a
                     // few across, no two rows of them lined up: a terminal
                     // draws a run of one color cheaply, which grains of two
@@ -2255,6 +2716,15 @@ impl Colony {
                     put(px, self.pw, qx as f64, py as f64 * 2.0, LEAF, 0.95);
                 }
             }
+        }
+    }
+
+    /// The ant being followed, marked: a point over it, beating.
+    fn marker(px: &mut [Rgb], pw: usize, at: (f64, f64), t: f64, th: &Theme) {
+        put(px, pw, at.0, at.1 - 4.0, th.accent, 1.0);
+        if (t * 5.0).sin() > 0.0 {
+            put(px, pw, at.0 - 1.0, at.1 - 6.0, th.accent, 0.9);
+            put(px, pw, at.0 + 1.0, at.1 - 6.0, th.accent, 0.9);
         }
     }
 
@@ -2312,6 +2782,10 @@ impl Colony {
                 let ang = k as f64 * 1.9 + 0.7;
                 put(px, pw, p.x + 3.5 * ang.cos(), p.z + 3.5 * ang.sin(), APHID, 1.0);
             }
+            if p.bug > 0.0 {
+                put(px, pw, p.x + 1.0, p.z - 2.0, LADYBIRD, 1.0);
+                put(px, pw, p.x + 2.0, p.z - 2.0, LADYBIRD.mix(Rgb(0, 0, 0), 0.5), 1.0);
+            }
         }
         // The other colony's nest, in its corner.
         for k in 0..24 {
@@ -2362,6 +2836,10 @@ impl Colony {
         for (dx, dy) in [(0.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (0.0, -1.5), (0.0, 1.5)] {
             put(px, pw, n.0 + dx, n.1 + dy, th.bg.mix(Rgb(0, 0, 0), 0.5), 1.0);
         }
+        // The one being followed is down the hole: marked there.
+        if self.follow.is_some_and(|id| self.ants.iter().any(|a| a.id == id && !matches!(a.loc, Loc::Surface(..) | Loc::Air(..)))) {
+            Self::marker(px, pw, n, t, th);
+        }
         for d in &self.dead {
             if let Loc::Surface(x, z) = d.0 {
                 put(px, pw, x, z, body.mix(Rgb(0, 0, 0), 0.55), 1.0);
@@ -2372,7 +2850,12 @@ impl Colony {
         }
         for a in &self.ants {
             match a.loc {
-                Loc::Surface(x, z) => ant(px, pw, (x, z), (a.heading.cos(), a.heading.sin()), body, Self::build(a), self.load(a, body, th)),
+                Loc::Surface(x, z) => {
+                    ant(px, pw, (x, z), (a.heading.cos(), a.heading.sin()), body, Self::build(a), self.load(a, body, th));
+                    if self.follow == Some(a.id) {
+                        Self::marker(px, pw, (x, z), t, th);
+                    }
+                }
                 // On the wing: off, any way, the further for being higher.
                 Loc::Air(x, z, up) => {
                     let at = (x + up * 1.6 * a.ph.cos(), z + up * 1.6 * a.ph.sin());
@@ -2445,6 +2928,11 @@ impl Colony {
                 let c = self.stem(p, up);
                 put(px, pw, c.0 + side * (1.0 + (k / pl.leaves.len().max(1)) as f64 * 2.0), c.1 - 2.0, APHID, 1.0);
             }
+            if pl.bug > 0.0 {
+                let c = self.stem(p, pl.leaves.last().map_or(pl.h, |l| l.0));
+                put(px, pw, c.0 + 2.0, c.1 - 2.0, LADYBIRD, 1.0);
+                put(px, pw, c.0 + 3.0, c.1 - 2.0, LADYBIRD.mix(Rgb(0, 0, 0), 0.5), 1.0);
+            }
         }
         // Rain, slanting down; and the door stopped up against it.
         if self.rain > 0.0 {
@@ -2491,7 +2979,20 @@ impl Colony {
         let leaf = habit(self.species).leaf;
         // Fresh leaf lying by the garden it'll become.
         let s = self.larder();
-        self.pile(px, s, (self.stock * 1.5) as usize, if leaf { FUNGUS } else { CRUMB }, 3);
+        match self.species {
+            // Honeypot ants keep it in themselves: workers hanging from
+            // the chamber's roof, full.
+            Species::Honeypot => {
+                let (c, n) = (self.nodes[s].end(), ((self.stock / 2.0) as usize).min(26));
+                for k in 0..n {
+                    let u = (k as f64 + 0.5) / n as f64 * 2.0 - 1.0;
+                    let (x, top) = (c.0 + u * self.nodes[s].rx * 0.85, c.1 - self.nodes[s].ry * (1.0 - u * u).max(0.0).sqrt());
+                    put(px, pw, x, top + 1.0, body, 1.0);
+                    put(px, pw, x, top + 3.0, HONEY, 1.0);
+                }
+            }
+            _ => self.pile(px, s, (self.stock * 1.5) as usize, if leaf { FUNGUS } else { CRUMB }, 3),
+        }
         self.pile(px, s, (self.leaf * 1.5) as usize, LEAF, 23);
         if let Some(m) = self.room(Room::Midden) {
             self.pile(px, m, self.refuse.min(50), body.mix(Rgb(0, 0, 0), 0.6), 11);
@@ -2510,7 +3011,7 @@ impl Colony {
             put(px, pw, at.0, at.1, body.mix(Rgb(0, 0, 0), 0.55), 1.0);
         }
         // The queen: long, dark behind, never still, never going anywhere.
-        if let Some(q) = self.room(Room::Queen) {
+        if let Some(q) = self.room(Room::Queen).filter(|_| self.queen) {
             let c = self.nodes[q].end();
             let x = c.0 - 1.0 + 0.8 * (t * 0.4).sin();
             for k in 0..5 {
@@ -2531,6 +3032,9 @@ impl Colony {
             ant(px, pw, at, dir, c, Self::build(a), self.load(a, body, th));
             if a.rider {
                 put(px, pw, at.0, at.1 - 4.0, BROOD.mix(body, 0.4), 1.0);
+            }
+            if self.follow == Some(a.id) {
+                Self::marker(px, pw, at, t, th);
             }
         }
     }
@@ -2637,7 +3141,8 @@ mod tests {
             // None on the text, once it's had time to walk off it.
             for a in &c.ants {
                 if let Loc::Surface(x, z) = a.loc {
-                    assert!(k < 90 || !c.blocked(x, z) || x < 1.0 || z < 1.0 || x >= c.w - 1.0 || z >= c.h - 1.0, "frame {k}");
+                    let near = (x - c.nest.0).powi(2) + (z - c.nest.1).powi(2) < 100.0;
+                    assert!(k < 90 || near || !text[z as usize / 4 * 80 + x as usize / 2], "frame {k}");
                 }
             }
         }
@@ -2882,8 +3387,8 @@ mod tests {
         c.step(1.0 / 30.0, 200.0, &[], &[]);
         let mut d = Colony::new(160, 60, 77, "black", Some(30));
         assert!(d.restore(&c.snapshot()));
-        assert_eq!(d.status(), c.status());
-        assert_eq!(d.snapshot(), c.snapshot());
+        assert_eq!((d.status(), d.snapshot_of(), d.history()), (c.status(), c.snapshot_of(), c.history()));
+        assert_eq!(d.snapshot().len(), c.snapshot().len());
         // One just begun, too, on a screen of another size.
         let mut young = Colony::new(220, 60, 3, "", None);
         watch(&mut young, 0.0, 12, |_| {});
@@ -2894,5 +3399,128 @@ mod tests {
         let whole = c.snapshot();
         assert!(!d.restore(&whole[..whole.len() / 2]) && !d.restore(&[0; 64]));
         assert_eq!(d.status(), c.status());
+    }
+
+    #[test]
+    fn its_keeper_follows_one_names_the_chambers_and_reads_what_happened() {
+        let mut c = colony("", 30);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        // f follows one; its line says who it is; f lets it go.
+        c.key('f');
+        let id = c.follow.unwrap();
+        assert!(c.status().starts_with(&format!("ant {id} · ")) && c.status().contains("days old"), "{}", c.status());
+        c.key('f');
+        assert!(c.follow.is_none() && c.status().starts_with("day 1"));
+        // A click on an ant follows it, and isn't food; a click on nothing is.
+        let a = c.ants.iter().find(|a| matches!(a.loc, Loc::Edge(..))).unwrap();
+        let (at, id, piles) = (a.at, a.id, c.piles.len());
+        c.step(1.0 / 30.0, 30.0, &[], &[(at.0, at.1 / 2.0)]);
+        assert_eq!((c.follow, c.piles.len()), (Some(id), piles));
+        c.step(1.0 / 30.0, 30.1, &[], &[(3.0, 1.0)]);
+        assert_eq!(c.piles.len(), piles + 1);
+        // Its time stopped, and quickened.
+        c.follow = None;
+        c.key('[');
+        assert_eq!((c.speed(), c.status().contains("stopped")), (0, true));
+        (0..3).for_each(|_| c.key(']'));
+        assert_eq!(c.speed(), 16);
+        c.key('[');
+        c.key('[');
+        // The chambers that are dug, named, from the side only.
+        let names: Vec<&str> = c.labels().iter().map(|l| l.2).collect();
+        assert!(names.contains(&"garden") && names.contains(&"queen"), "{names:?}");
+        c.view(true);
+        assert!(c.labels().is_empty());
+        c.view(false);
+        // What's happened: how it began, and after a winter, that.
+        c.clock = DAY * 14.9;
+        watch(&mut c, 31.0, 80, |_| {});
+        let said = c.history().join("\n");
+        assert!(said.contains("a queen founded it") && said.contains("winter came") && said.contains("workers, the last"), "{said}");
+    }
+
+    #[test]
+    fn it_lives_on_while_it_is_away_and_after_its_queen() {
+        // Left an hour: it's an hour older, and says so.
+        let mut c = colony("", 10);
+        let day = c.clock;
+        c.stamp = 1000.0;
+        c.catch_up(1000.0 + 3600.0);
+        assert!((c.clock - day - 3600.0).abs() < 1.0 && c.history().join(" ").contains("left alone 60 minutes"));
+        // Left a moment: nothing.
+        let at = c.clock;
+        c.stamp = 5000.0;
+        c.catch_up(5010.0);
+        assert_eq!(c.clock, at);
+        // The queen's years run out: no more eggs, and when the last
+        // worker's gone, another queen begins again in the same nest.
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        c.reign = c.span;
+        c.clock = DAY * 2.4;
+        watch(&mut c, 0.0, 2, |_| {});
+        assert!(!c.queen && c.status().contains("no queen"));
+        c.ants.clear();
+        c.brood.clear();
+        let dug = c.nodes.iter().filter(|n| n.done()).count();
+        watch(&mut c, 2.0, 60, |_| {});
+        assert!(c.queen && !c.ants.is_empty() && c.nodes.iter().filter(|n| n.done()).count() >= dug);
+        let said = c.history().join(" ");
+        assert!(said.contains("the queen died") && said.contains("a new queen came"), "{said}");
+    }
+
+    #[test]
+    fn tasks_are_piles_stones_are_gone_round_and_seeds_sprout() {
+        let mut c = colony("black", 0);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        // A pile a task: there while the task is, however much is taken.
+        let had = c.piles.len();
+        c.tasks(Some(4));
+        assert_eq!((c.piles.len(), c.tasks.len()), (had + 4, 4));
+        watch(&mut c, 0.0, 120, |c| assert!(c.tasks.iter().all(|id| c.piles.iter().any(|p| p.3 == *id && p.2 >= 5.0))));
+        c.tasks(Some(1));
+        assert_eq!(c.tasks.len(), 1);
+        c.tasks(None);
+        assert!(c.tasks.is_empty());
+        // Stones, and no tunnel through one, however much is dug.
+        let mut c = colony("", 0);
+        assert!(c.stones.len() >= 2);
+        for n in &mut c.nodes {
+            (n.dug, n.open) = (n.len, 1.0);
+        }
+        c.carve();
+        for s in &c.stones {
+            let (x, y) = (s.0 as usize, (s.1 / 2.0) as usize);
+            assert!(!c.hole[y.min(c.ph - 1) * c.pw + x.min(c.pw - 1)], "{s:?}");
+        }
+        // A full midden, in spring: a plant comes up.
+        (c.cloud, c.prowl, c.muster, c.refuse) = (f64::MAX, f64::MAX, f64::MAX, 30);
+        let plants = c.plants.len();
+        watch(&mut c, 0.0, 200, |_| {});
+        assert!(c.plants.len() > plants && c.history().join(" ").contains("sprouted"));
+    }
+
+    #[test]
+    fn honeypots_hang_ladybirds_are_driven_off_and_army_ants_move_on() {
+        // Honeypot ants milk aphids; a ladybird on a plant goes when an
+        // ant gets there.
+        let mut c = colony("honeypot", 0);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        assert!(c.milks() && c.plants.iter().all(|p| p.aphids == 6.0));
+        c.plants.iter_mut().for_each(|p| p.bug = 1e9);
+        watch(&mut c, 0.0, 200, |_| {});
+        assert!(c.plants.iter().any(|p| p.bug == 0.0) && c.stock > 0.0);
+        // Army ants: one hollow, nothing dug; toward evening they go, all
+        // of them, and the hollow's where they went.
+        let mut c = colony("army", 0);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        assert_eq!((c.nodes.len(), c.site(), c.labels()[0].2), (2, None, "bivouac"));
+        let was = c.nest;
+        c.clock = DAY * 17.6 / 24.0;
+        let mut out = 0;
+        watch(&mut c, 0.0, 100, |c| out = out.max(c.ants.iter().filter(|a| c.trek.is_some() && matches!(a.loc, Loc::Surface(..))).count()));
+        assert!(c.nest != was && c.trek.is_none() && out * 5 >= c.ants.len() * 3, "{out} of {}", c.ants.len());
+        assert!((c.nodes[1].end().0 - c.nest.0).abs() < 1.0 && c.history().join(" ").contains("moved on"));
+        watch(&mut c, 100.0, 30, |_| {});
+        all_in_holes(&c);
     }
 }
