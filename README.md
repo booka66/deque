@@ -172,7 +172,7 @@ It begins with a queen alone at the bottom of the shaft she dug, with her first 
 
 **It isn't alone.** Twigs fall and lie in the way till they've rotted. A spider comes hunting: it eats a few of those that are out, and goes, unless enough of those that fight bring it down, and then it's food. Across the way is another colony, whose foragers take the same food; where one of theirs meets one of ours they square up, and sometimes one dies.
 
-**A queen has her years**, three or so. When they run out there are no more eggs, and the colony dwindles; when its last worker's gone, a new queen comes down and begins again in the same nest. **Stones** lie in the soil, and tunnels wind round them; plants have roots. **A ladybird** comes for the aphids now and then, till an ant gets there and drives it off. **A seed from a full midden sprouts**, by the door, in the warm half of the year.
+**A queen has her years**, three or so. When they run out there are no more eggs, and the colony dwindles; when its last worker's gone, a new queen comes down and begins again in the same nest. **Stones** lie in the soil, and tunnels wind round them; plants have roots. **A ladybird** comes for the aphids now and then, till an ant gets there and drives it off. **A seed from a full midden sprouts**, by the door, in the warm half of the year. **Plants die**: one whose leaves are kept cut short sickens, and in a few minutes it's a brown stalk, and then gone; so does an old one, and each winter takes some. When few are left a seedling comes up somewhere else, and the trails go there.
 
 **For its keeper:**
 
@@ -187,7 +187,7 @@ It begins with a queen alone at the bottom of the shaft she dug, with her first 
 
 The colony is kept on disk (under `~/.deque/colonies`), written every ten seconds, so it's there next time; `--fresh` begins it anew. **It lives on while deque isn't running:** when it's next looked at, the time it was left alone is made up, twenty minutes of it lived through at once and the rest gone by on its clock, and `H` says how long it was.
 
-**Food can stand for tasks.** A second number after `sky: ants` is how many piles of food there are to be, each there, however much is carried off, till the number drops. With a command for it, read again each minute, that's a pile a task: `sky: ants 60 ${sh: gh issue list --assignee @me | wc -l}`. A week with a lot to do is a well-fed colony. A window resized keeps it, everything where it was, in proportion. Text on the slide is stuck on the glass: the nest goes on behind it.
+**Food can stand for tasks.** A second number after `sky: ants` is how many piles of food there are to be, each there, however much is carried off, till the number drops. With a command for it, read again each minute, that's a pile a task: `sky: ants 60 ${sh: gh issue list --assignee @me | wc -l}`. A week with a lot to do is a well-fed colony. A window resized keeps it, everything where it was, in proportion, the trails on the ground too. Text on the slide is stuck on the glass: the nest goes on behind it.
 
 A click drops food, in either. `deque demo/ants.deque --loop` shows every kind, and goes round by itself; `deque demo/antfarm.deque` is a farm and nothing else, for a screen left on.
 

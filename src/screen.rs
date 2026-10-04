@@ -204,11 +204,13 @@ impl Screen {
             return;
         }
         self.shelve();
+        // What's been clicked goes with it, and which clicks it's had.
+        let fed = self.sky.as_ref().map_or(f64::NEG_INFINITY, |s| s.fed);
         let (pointer, ripples, trail, floats) = self.sky.take().map(|s| (s.pointer, s.ripples, s.trail, s.floats)).unwrap_or_default();
         let kept = self.colonies.iter().position(|c| kind == Kind::Ants && c.0 == colony(said)).map(|k| self.colonies.remove(k).1);
         self.make_sky(kind, glow, said, many, kept);
         let s = self.sky.as_mut().unwrap();
-        (s.pointer, s.ripples, s.trail, s.floats) = (pointer, ripples, trail, floats);
+        (s.pointer, s.ripples, s.trail, s.floats, s.fed) = (pointer, ripples, trail, floats, fed);
     }
 
     /// The sky's ant colony, if it has one, put by for when its slide's

@@ -191,7 +191,7 @@ pub struct Sky {
     koi: Vec<Koi>,
     pads: Vec<(f64, f64, f64, f64)>,
     food: Vec<(f64, f64, f64)>,
-    fed: f64,
+    pub fed: f64,
     rings: Vec<(f64, f64, f64)>,
     /// Watchers' reactions, rising up the right of the screen.
     pub floats: Vec<Float>,
@@ -513,6 +513,7 @@ impl Sky {
             if tw.as_mut().is_some_and(|tw| !tw.owns()) {
                 let (tw, (w, h)) = (tw.as_mut().unwrap(), a.size());
                 tw.follow(a);
+                a.unhurried();
                 // A click on an ant follows it, here; elsewhere it's food,
                 // for the keeper to drop.
                 for c in &clicks {
@@ -527,6 +528,15 @@ impl Sky {
                 // As fast as its keeper has its time going.
                 for k in 0..a.speed() {
                     a.step(dt, t, &self.text, if k == 0 { &clicks } else { &[] });
+                }
+                // Stopped, a click still follows an ant, or drops food.
+                if a.speed() == 0 {
+                    let (w, h) = a.size();
+                    for c in &clicks {
+                        if !a.pick(c.0, c.1) {
+                            a.feed(c.0 / w as f64, c.1 / h as f64, top);
+                        }
+                    }
                 }
                 if let Some(tw) = tw {
                     tw.publish(a);

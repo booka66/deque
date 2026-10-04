@@ -487,6 +487,7 @@ fn present(args: &[String]) -> Result<(), String> {
     // i: how an ant colony's doing, on the top row, said again each second;
     // what was last said, to write over.
     let (mut info, mut told, mut said) = (false, Instant::now(), 0usize);
+    let mut named: Vec<(i32, i32, &str)> = vec![];
     loop {
         if n != on {
             if let Some(t) = spent.get_mut(on) {
@@ -601,10 +602,17 @@ fn present(args: &[String]) -> Result<(), String> {
                     let line = format!("{text}{}", " ".repeat(said.saturating_sub(wide)));
                     let st = markup::Style::fg(talk.theme.muted);
                     s.put_str(1, 2, &line, st);
-                    // Its chambers, named.
-                    for (row, col, name) in names {
+                    // Its chambers, named; a name that's moved, wiped where
+                    // it was.
+                    if names != named {
+                        for (row, col, name) in &named {
+                            s.put_str(row + 1, col + 1, &" ".repeat(name.len()), markup::Style::default());
+                        }
+                    }
+                    for (row, col, name) in &names {
                         s.put_str(row + 1, col + 1, name, st);
                     }
+                    named = names;
                     said = wide;
                 }
                 s.flush();
@@ -739,7 +747,10 @@ fn present(args: &[String]) -> Result<(), String> {
             // An ant colony the other way: the farm's, from above; the
             // ground's, from the side.
             Act::View => s.other_view = !s.other_view,
-            Act::Info => (info, said) = (!info, 0),
+            Act::Info => {
+                (info, said) = (!info, 0);
+                named.clear();
+            }
             // The ant colony's own keys: f follows an ant, [ and ] slow and
             // quicken its time.
             Act::Ants(key) => {

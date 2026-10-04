@@ -127,7 +127,9 @@ fn tell(code: u8, n: f64) -> String {
         10 if n >= 120.0 => format!("left alone {:.0} hours", n / 60.0),
         10 => format!("left alone {n:.0} minutes"),
         11 => "a seed from the midden sprouted".into(),
-        _ => "the colony moved on".into(),
+        12 => "the colony moved on".into(),
+        13 => "a plant died".into(),
+        _ => "a seedling came up".into(),
     }
 }
 
@@ -235,7 +237,7 @@ impl In<'_> {
 }
 
 /// What a snapshot starts with: another, when what's in one changes.
-const SNAPSHOT: f64 = 7.0;
+const SNAPSHOT: f64 = 8.0;
 const ROOMS: [Room; 6] = [Room::None, Room::Store, Room::Nursery, Room::Midden, Room::Queen, Room::Spare];
 const JOBS: [Job; 7] = [Job::Dig, Job::Forage, Job::Nurse, Job::Bury, Job::Rest, Job::Guard, Job::Fly];
 const CASTES: [Caste; 4] = [Caste::Minim, Caste::Media, Caste::Major, Caste::Alate];
@@ -432,6 +434,21 @@ struct Plant {
     /// ladybird's on it, eating them.
     aphids: f64,
     bug: f64,
+    /// How well it is, 1 down to 0, when it's dead; how much longer it
+    /// stands there dead, before it's gone; and how old it is.
+    health: f64,
+    wither: f64,
+    age: f64,
+}
+
+impl Plant {
+    fn alive(&self) -> bool {
+        self.health > 0.0
+    }
+    /// Dead and fallen: nothing there, till something grows there again.
+    fn gone(&self) -> bool {
+        !self.alive() && self.wither <= 0.0
+    }
 }
 
 /// One of another colony's, out on the same ground: where, which way,
@@ -601,7 +618,7 @@ impl Colony {
             Species::Leafcutter
         };
         let (w, h) = (pw as f64, ph as f64 * 2.0);
-        let usual = (pw * ph / 220).clamp(16, 110) * if species == Species::Fire { 3 } else { 2 } / 2;
+        let usual = Self::usual(pw, ph, species);
         let mut c = Colony {
             seed,
             pw,
@@ -678,6 +695,11 @@ impl Colony {
         c
     }
 
+    /// How many workers at most suit a screen, when the talk doesn't say.
+    fn usual(pw: usize, ph: usize, species: Species) -> usize {
+        (pw * ph / 220).clamp(16, 110) * if species == Species::Fire { 3 } else { 2 } / 2
+    }
+
     /// Which colony it is: the same number, the same colony.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn seed(&self) -> u32 {
@@ -750,6 +772,12 @@ impl Colony {
             ']' => self.speed = (self.speed + 1).min(3),
             _ => {}
         }
+    }
+
+    /// Its time as it goes, neither stopped nor hurried: for a pane that
+    /// only shows what another keeps.
+    pub fn unhurried(&mut self) {
+        self.speed = 1;
     }
 
     /// How many moments of its time go by in one of its keeper's.
@@ -894,7 +922,7 @@ impl Colony {
                 Caste::Major => "a major",
                 Caste::Alate => "winged",
             };
-            let days = (self.clock - a.born) / DAY;
+            let days = a.age / DAY;
             return format!("ant {} · {kind} · {days:.1} days old, of {:.1} · {what} · {} trips home", a.id, a.life / DAY, a.trips);
         }
         let h = self.hour();
@@ -941,7 +969,7 @@ impl Colony {
     }
 
     /// The colony on a screen of another size: everything where it was,
-    /// in proportion. The scent on the ground is laid again.
+    /// in proportion, the trails on the ground with it.
     pub fn resize(&mut self, pw: usize, ph: usize) {
         if (pw, ph) == (self.pw, self.ph) {
             return;
@@ -1010,8 +1038,25 @@ impl Colony {
         }
         self.mound = (0..pw).map(|k| self.mound[((k as f64 / sx) as usize).min(self.pw - 1)] * sy.min(sx)).collect();
         self.nest = (self.nest.0 * sx, self.nest.1 * sz);
+        // The scent on the ground, where it was: each pixel now takes the
+        // strongest of those it covers, or the one it's a part of, so a
+        // trail a pixel wide isn't lost on a smaller screen.
+        let (opw, oph) = (self.pw, self.ph);
+        let most = |k: usize, of: &dyn Fn(usize) -> f32| {
+            let (x0, y0) = (k % pw * opw / pw, k / pw * oph / ph);
+            let (x1, y1) = (((k % pw + 1) * opw / pw).max(x0 + 1).min(opw), ((k / pw + 1) * oph / ph).max(y0 + 1).min(oph));
+            (y0.min(oph - 1)..y1).flat_map(|y| (x0.min(opw - 1)..x1).map(move |x| y * opw + x)).map(of).fold(0.0, f32::max)
+        };
+        let scent: Vec<f32> = (0..pw * ph).map(|k| most(k, &|i| self.scent[i])).collect();
+        let shown: Vec<u8> = (0..pw * ph).map(|k| most(k, &|i| self.shown[i] as f32) as u8).collect();
         (self.pw, self.ph, self.w, self.h, self.gy) = (pw, ph, w, h, gy);
-        (self.hole, self.scent, self.shown) = (vec![false; pw * ph], vec![0.0; pw * ph], vec![0; pw * ph]);
+        (self.hole, self.scent, self.shown) = (vec![false; pw * ph], scent, shown);
+        // As many as suit this screen, where that's what it was going by.
+        let usual = Self::usual(pw, ph, self.species);
+        if self.cap == self.usual {
+            self.cap = usual;
+        }
+        self.usual = usual;
         self.carve();
         for i in 0..self.ants.len() {
             self.ants[i].at = self.spot(self.ants[i].loc, self.ants[i].side);
@@ -1064,7 +1109,7 @@ impl Colony {
         }
         o.n(self.plants.len() as f64);
         for p in &self.plants {
-            o.all([p.x, p.z, p.h, p.lean, p.aphids, p.bug, p.leaves.len() as f64]);
+            o.all([p.x, p.z, p.h, p.lean, p.aphids, p.bug, p.health, p.wither, p.age, p.leaves.len() as f64]);
             p.leaves.iter().for_each(|l| o.all([l.0, l.1, l.2]));
         }
         o.n(self.piles.len() as f64);
@@ -1109,7 +1154,7 @@ impl Colony {
         let mut i = In(bytes);
         let [version, pw, ph, stock, refuse, lay, count, nx, nz] = i.all()?;
         let (pw, ph) = (pw as usize, ph as usize);
-        if version != SNAPSHOT || pw == 0 || ph == 0 || pw * ph > 4_000_000 {
+        if version != SNAPSHOT || pw == 0 || ph == 0 || pw.checked_mul(ph).is_none_or(|n| n > 4_000_000) {
             return None;
         }
         let [leaf, flew, raise, flown, cx, cz, muster] = i.all()?;
@@ -1120,8 +1165,14 @@ impl Colony {
         for _ in 0..many {
             let [parent, room, rx, ry, open, dug, points] = i.all()?;
             let path = (0..(points as usize).clamp(1, 4096)).map(|_| i.all().map(|[x, y]| (x, y))).collect::<Option<Vec<_>>>()?;
-            let mut t = Tunnel::new((parent >= 0.0 && parent < many as f64).then_some(parent as usize)?, path, *ROOMS.get(room as usize)?, rx, ry);
-            (t.open, t.dug) = (open, dug);
+            // Dug from a place before it, and no bigger than a screen.
+            let from = (parent >= 0.0 && (parent as usize) <= nodes.len().saturating_sub(1)).then_some(parent as usize)?;
+            if !(0.0..=2000.0).contains(&rx) || !(0.0..=2000.0).contains(&ry) {
+                return None;
+            }
+            let mut t = Tunnel::new(from, path, *ROOMS.get(room as usize)?, rx, ry);
+            // Dug through is dug through, however the length rounds.
+            (t.open, t.dug) = (open, if t.len - dug < 1e-6 { t.len } else { dug });
             nodes.push(t);
         }
         // A nest has its way in, and a queen, or it isn't one.
@@ -1185,9 +1236,9 @@ impl Colony {
         }
         let mut plants = vec![];
         for _ in 0..i.u(64)? {
-            let [x, z, h, lean, aphids, bug, leaves] = i.all()?;
-            let leaves = (0..(leaves as usize).min(64)).map(|_| i.all().map(|[a, b, c]| (a, b, c))).collect::<Option<Vec<_>>>()?;
-            plants.push(Plant { x, z, h: h.max(1.0), lean, leaves, aphids, bug });
+            let [x, z, h, lean, aphids, bug, health, wither, age, leaves] = i.all()?;
+            let leaves = (0..(leaves as usize).clamp(1, 64)).map(|_| i.all().map(|[a, b, c]| (a, b, c))).collect::<Option<Vec<_>>>()?;
+            plants.push(Plant { x, z, h: h.max(1.0), lean, leaves, aphids, bug, health, wither, age });
         }
         // What it says of a plant, a leaf or a tunnel has to be there.
         for a in &mut ants {
@@ -1234,16 +1285,17 @@ impl Colony {
         (self.reign, self.queen, self.span, self.stamp, self.season_was, self.flock, self.moved) = (reign, queen != 0.0, span.max(DAY), stamp, (season_was as usize).min(3), flock as usize, moved);
         self.trek = (trekking != 0.0).then_some((tx, tz, since));
         (self.stones, self.events, self.pops, self.tasks) = (stones, events, pops, tasks);
+        self.sampled = self.clock;
         (self.clock, self.rain, self.cloud, self.plug) = (clock.max(0.0), rain, cloud, plug.clamp(0.0, 1.0));
         (self.pw, self.ph, self.w, self.h) = (pw, ph, pw as f64, ph as f64 * 2.0);
         self.gy = (self.h * 0.26).round();
         self.hole = vec![false; pw * ph];
+        // The trails as they showed there, and scent to match, for when
+        // this one's keeping it: the resize brings them here.
+        self.shown = i.0.iter().map(|s| (*s).min(3)).collect();
+        self.scent = self.shown.iter().map(|s| *s as f32 / 4.5).collect();
         self.carve();
         self.resize(mine.0, mine.1);
-        // The trails, as they showed there, here; and scent to match, for
-        // when this one's keeping it.
-        self.shown = (0..mine.0 * mine.1).map(|k| i.0[(k / mine.0 * ph / mine.1).min(ph - 1) * pw + (k % mine.0 * pw / mine.0).min(pw - 1)].min(3)).collect();
-        self.scent = self.shown.iter().map(|s| *s as f32 / 4.5).collect();
         for k in 0..self.ants.len() {
             self.ants[k].at = self.spot(self.ants[k].loc, self.ants[k].side);
         }
@@ -1472,7 +1524,7 @@ impl Colony {
         if s.hp <= 0.0 {
             // Dead: a prize to carry home.
             self.count += 1;
-            self.piles.push((s.x.clamp(1.0, self.w - 2.0), s.z.clamp(1.0, self.h - 2.0), 14.0, self.count));
+            self.piles.push((s.x.min(self.w - 2.0).max(1.0), s.z.min(self.h - 2.0).max(1.0), 14.0, self.count));
             self.prowl = gone();
             self.note(3, 0.0);
             return;
@@ -1508,7 +1560,7 @@ impl Colony {
         }
         // Not leaving, it keeps to the ground.
         if !leaving {
-            (s.x, s.z) = (s.x.clamp(1.0, self.w - 2.0), s.z.clamp(1.0, self.h - 2.0));
+            (s.x, s.z) = (s.x.min(self.w - 2.0).max(1.0), s.z.min(self.h - 2.0).max(1.0));
         }
         self.hunter = Some(s);
     }
@@ -1521,26 +1573,8 @@ impl Colony {
             self.mound[k] = if d < 2.0 { 0.0 } else { (heap * (3.0 - (d - 6.0).abs() * 0.45)).max(0.0) };
         }
         for _ in 0..3 {
-            // A way off from the nest, and from each other: the best of a
-            // few places tried. Far across counts for more, that being all
-            // that shows from the side.
-            let mut best = (f64::MIN, 0.0, 0.0);
-            for _ in 0..16 {
-                let (x, z) = (8.0 + (self.w - 16.0).max(0.0) * self.r(), self.h * (0.12 + 0.76 * self.r()));
-                let from = |p: (f64, f64)| ((p.0 - x).powi(2) + (p.1 - z).powi(2)).sqrt();
-                let apart = self.plants.iter().map(|p| from((p.x, p.z)).min((p.x - x).abs() * 1.5)).fold(f64::MAX, f64::min);
-                let score = from(self.nest).min((self.nest.0 - x).abs() * 1.6).min(apart);
-                if score > best.0 {
-                    best = (score, x, z);
-                }
-            }
-            let (x, z) = (best.1, best.2);
-            let h = self.gy * (0.62 + 0.25 * self.r());
-            let n = ((h / 5.0) as usize).clamp(2, 6);
-            let leaves = (0..n).map(|k| (h * (0.35 + 0.65 * (k + 1) as f64 / n as f64), if k % 2 == 0 { 1.0 } else { -1.0 }, 1.0)).collect();
-            let lean = (self.r() - 0.5) * 0.5;
-            let aphids = if self.milks() { 6.0 } else { 0.0 };
-            self.plants.push(Plant { x, z, h, lean, leaves, aphids, bug: 0.0 });
+            let at = self.plant_site();
+            self.grow(at, 1.0);
         }
         // A twig lying about already, part rotted.
         self.twig();
@@ -1549,6 +1583,75 @@ impl Colony {
         let corners = [(10.0, 10.0), (self.w - 10.0, 10.0), (10.0, self.h - 10.0), (self.w - 10.0, self.h - 10.0)];
         let far = |c: &(f64, f64)| (c.0 - self.nest.0).powi(2) + (c.1 - self.nest.1).powi(2);
         self.camp = *corners.iter().max_by(|a, b| far(a).total_cmp(&far(b))).unwrap();
+    }
+
+    /// Somewhere for a plant: a way off from the nest, and from the
+    /// others, the best of a few places tried. Far across counts for more,
+    /// that being all that shows from the side.
+    fn plant_site(&mut self) -> (f64, f64) {
+        let mut best = (f64::MIN, 0.0, 0.0);
+        for _ in 0..16 {
+            let (x, z) = (8.0 + (self.w - 16.0).max(0.0) * self.r(), self.h * (0.12 + 0.76 * self.r()));
+            let from = |p: (f64, f64)| ((p.0 - x).powi(2) + (p.1 - z).powi(2)).sqrt();
+            let apart = self.plants.iter().filter(|p| !p.gone()).map(|p| from((p.x, p.z)).min((p.x - x).abs() * 1.5)).fold(f64::MAX, f64::min);
+            let score = from(self.nest).min((self.nest.0 - x).abs() * 1.6).min(apart);
+            if score > best.0 {
+                best = (score, x, z);
+            }
+        }
+        (best.1, best.2)
+    }
+
+    /// A plant at a place, its leaves `leaf` grown: where one's died and
+    /// gone, if one has, so those that knew the others still do.
+    fn grow(&mut self, at: (f64, f64), leaf: f64) {
+        let h = self.gy * (0.62 + 0.25 * self.r());
+        let n = ((h / 5.0) as usize).clamp(2, 6);
+        let leaves = (0..n).map(|k| (h * (0.35 + 0.65 * (k + 1) as f64 / n as f64), if k % 2 == 0 { 1.0 } else { -1.0 }, leaf)).collect();
+        let lean = (self.r() - 0.5) * 0.5;
+        let aphids = if self.milks() && leaf >= 1.0 { 6.0 } else { 0.0 };
+        let plant = Plant { x: at.0, z: at.1, h, lean, leaves, aphids, bug: 0.0, health: 1.0, wither: 0.0, age: 0.0 };
+        match self.plants.iter().position(|p| p.gone()) {
+            Some(k) => self.plants[k] = plant,
+            None => self.plants.push(plant),
+        }
+        self.made = None;
+    }
+
+    /// The plants a moment on. One whose leaves are kept cut short, or
+    /// that's old, sickens, and in the end dies; it stands dead a while,
+    /// then it's gone. Some die at the start of each winter. When few are
+    /// left, a seedling comes up somewhere, in the warm half of the year.
+    fn garden(&mut self, dt: f64, bare: bool, winter_came: bool) {
+        for k in 0..self.plants.len() {
+            let kill = winter_came && self.plants[k].alive() && self.r() < 0.2;
+            let p = &mut self.plants[k];
+            if !p.alive() {
+                p.wither -= dt;
+                p.leaves.iter_mut().for_each(|l| l.2 = (l.2 - dt / 20.0).max(0.0));
+                (p.aphids, p.bug) = (0.0, 0.0);
+                if p.wither <= 0.0 && p.wither > -dt {
+                    self.made = None;
+                }
+                continue;
+            }
+            p.age += dt;
+            let leaf = p.leaves.iter().map(|l| l.2).sum::<f64>() / p.leaves.len().max(1) as f64;
+            // Cut hard, past its first days; or old.
+            let sick = (!bare && p.age > 200.0 && leaf < 0.4) || p.age > DAY * YEAR * 2.5;
+            p.health = if kill { 0.0 } else if sick { p.health - dt / 150.0 } else { (p.health + dt / 400.0).min(1.0) };
+            if !p.alive() {
+                p.wither = 90.0;
+                self.made = None;
+                self.note(13, 0.0);
+            }
+        }
+        let living = self.plants.iter().filter(|p| p.alive()).count();
+        if living < 2 && self.season() < 2 && self.r() < dt / 45.0 {
+            let at = self.plant_site();
+            self.grow(at, 0.05);
+            self.note(14, 0.0);
+        }
     }
 
     /// A colony well under way, as `grown` asks for: the shaft, the store
@@ -1658,7 +1761,7 @@ impl Colony {
             if self.blocked(nx, nz) && !self.blocked(r.x, r.z) {
                 r.dir += (0.9 + self.r()) * if self.rng.below(2) == 0 { 1.0 } else { -1.0 };
             } else {
-                (r.x, r.z) = (nx.clamp(0.0, self.w - 0.01), nz.clamp(0.0, self.h - 0.01));
+                (r.x, r.z) = (nx.min(self.w - 0.01).max(0.0), nz.min(self.h - 0.01).max(0.0));
             }
             // One of ours within reach, and not in a fight already: they
             // close, and it's settled.
@@ -1681,7 +1784,7 @@ impl Colony {
                 if self.rng.below(100) < odds {
                     // Theirs dead: something to carry home.
                     self.count += 1;
-                    self.piles.push((r.x.clamp(1.0, self.w - 2.0), r.z.clamp(1.0, self.h - 2.0), 1.0, self.count));
+                    self.piles.push((r.x.min(self.w - 2.0).max(1.0), r.z.min(self.h - 2.0).max(1.0), 1.0, self.count));
                     continue;
                 }
                 self.ants[k].age = self.ants[k].life;
@@ -1730,7 +1833,12 @@ impl Colony {
         // There: the hollow's here now, everyone in it or by it.
         let dx = x - self.nest.0;
         for n in &mut self.nodes {
+            let through = n.dug >= n.len;
             n.path.iter_mut().for_each(|p| p.0 += dx);
+            n.measure();
+            if through {
+                n.dug = n.len;
+            }
         }
         self.nest = (x, z);
         self.mound.fill(0.0);
@@ -1846,7 +1954,7 @@ impl Colony {
 
     /// Whether an ant on the ground can't be at a place: it's off the
     /// screen, there's a twig lying there, or, seen from above, it's under
-    /// text. Round the nest's hole it always can.
+    /// text. Round the nest's hole it always can, and round food.
     fn blocked(&self, x: f64, z: f64) -> bool {
         if x < 1.0 || z < 1.0 || x >= self.w - 1.0 || z >= self.h - 1.0 {
             return true;
@@ -1855,7 +1963,14 @@ impl Colony {
         if !near && self.twigs.iter().any(|t| t.left > 0.12 && off((x, z), t.a, t.b) < 1.6) {
             return true;
         }
-        self.top && !near && self.text.get(z as usize / 4 * (self.pw / 2) + x as usize / 2).is_some_and(|t| *t)
+        if !self.top || near || !self.text.get(z as usize / 4 * (self.pw / 2) + x as usize / 2).is_some_and(|t| *t) {
+            return false;
+        }
+        // Under text; but food that's under text can still be got to, from
+        // as far off as it can be seen.
+        let far = (16.0 * self.scale()).powi(2);
+        let by = |fx: f64, fz: f64| (fx - x).powi(2) + (fz - z).powi(2) < far;
+        !(self.piles.iter().any(|p| by(p.0, p.1)) || self.plants.iter().any(|p| p.alive() && by(p.x, p.z)))
     }
 
     fn cell(&self, x: f64, z: f64) -> Option<usize> {
@@ -1869,7 +1984,7 @@ impl Colony {
         let leaf = habit(self.species).leaf;
         // Garden ants go to a plant for its aphids.
         let milk = self.milks();
-        let plants = self.plants.iter().enumerate().filter(|(_, p)| (leaf && p.leaves.iter().any(|l| l.2 > 0.3)) || (milk && p.aphids >= 1.0)).map(|(k, p)| (Found::Plant(k), p.x, p.z));
+        let plants = self.plants.iter().enumerate().filter(|(_, p)| p.alive() && ((leaf && p.leaves.iter().any(|l| l.2 > 0.3)) || (milk && p.aphids >= 1.0))).map(|(k, p)| (Found::Plant(k), p.x, p.z));
         let piles = self.piles.iter().filter(|p| p.2 > 0.0).map(|p| (Found::Pile(p.3), p.0, p.1));
         let far = |f: &(Found, f64, f64)| (f.1 - x).powi(2) + (f.2 - z).powi(2);
         plants.chain(piles).filter(|f| far(f) < reach * reach).min_by(|a, b| far(a).total_cmp(&far(b)))
@@ -1943,7 +2058,7 @@ impl Colony {
             a.heading += (0.9 + self.r()) * if self.rng.below(2) == 0 { 1.0 } else { -1.0 };
             a.dodge = 0.7;
         } else {
-            (x, z) = (nx.clamp(0.0, self.w - 0.01), nz.clamp(0.0, self.h - 0.01));
+            (x, z) = (nx.min(self.w - 0.01).max(0.0), nz.min(self.h - 0.01).max(0.0));
         }
         a.loc = Loc::Surface(x, z);
         // Coming home with food, it lays the scent the others follow.
@@ -2001,8 +2116,8 @@ impl Colony {
                         _ => {
                             let p = self.nodes[e].parent;
                             a.loc = match under.and_then(|(g, _)| self.toward(p, g)) {
-                                // The door's stopped up: no way out.
-                                _ if p == 0 && under.is_none() && self.plug > 0.5 => return true,
+                                // The door's stopped up: it waits by it.
+                                _ if p == 0 && under.is_none() && self.plug > 0.5 => Loc::Edge(e, ns),
                                 // Out of the hole, onto the ground.
                                 _ if p == 0 && under.is_none() => {
                                     (a.heading, a.scent) = (TAU * self.r(), 1.0);
@@ -2048,7 +2163,7 @@ impl Colony {
                 wants.insert(0, Job::Dig);
             }
             // The dead aren't left lying.
-            if a.caste != Caste::Minim && doing(Job::Bury) * 6 < pop {
+            if a.caste != Caste::Minim && !self.dead.is_empty() && doing(Job::Bury) * 6 < pop {
                 wants.insert(0, Job::Bury);
             }
         }
@@ -2077,9 +2192,10 @@ impl Colony {
                 }
                 _ => return false,
             },
-            Job::Bury => match self.dead.iter().position(|d| !d.2) {
+            // One nobody alive is on the way to: whoever was may have been
+            // eaten, or called off.
+            Job::Bury => match self.dead.iter().position(|d| !self.ants.iter().any(|o| o.id != a.id && o.job == Job::Bury && o.stage == 0 && o.aim == d.1)) {
                 Some(k) => {
-                    self.dead[k].2 = true;
                     a.aim = self.dead[k].1;
                     match self.dead[k].0 {
                         Loc::Surface(x, z) | Loc::Air(x, z, _) => Goal::Point(x, z),
@@ -2310,7 +2426,9 @@ impl Colony {
     }
 
     fn live(&mut self, a: &mut Ant, dt: f64) {
-        a.age += dt;
+        // In winter they're all but asleep, and hardly age: a colony comes
+        // through it.
+        a.age += dt * if self.season() == 3 { 0.1 } else { 1.0 };
         // Army ants moving: everyone goes where the colony's going.
         if let Some((x, z, _)) = self.trek
             && !matches!(a.goal, Goal::Point(gx, gz) if (gx, gz) == (x, z))
@@ -2380,6 +2498,22 @@ impl Colony {
         }
         self.clock += dt;
         let winter = self.season() == 3;
+        // Seen from above, food that's under the slide's text is moved out
+        // from under it, to the nearest clear ground: nothing could see it
+        // there.
+        if self.top {
+            let under = |c: &Colony, x: f64, z: f64| c.text.get(z as usize / 4 * (c.pw / 2) + x as usize / 2).is_some_and(|t| *t);
+            for k in 0..self.piles.len() {
+                let (x, z) = (self.piles[k].0, self.piles[k].1);
+                if !under(self, x, z) {
+                    continue;
+                }
+                let clear = (1..60).flat_map(|ring| (0..16).map(move |i| (ring as f64 * 4.0, i as f64 / 16.0 * TAU))).map(|(out, ang)| (x + out * ang.cos(), z + out * ang.sin())).find(|&(nx, nz)| nx >= 2.0 && nz >= 2.0 && nx < self.w - 2.0 && nz < self.h - 2.0 && !under(self, nx, nz));
+                if let Some((nx, nz)) = clear {
+                    (self.piles[k].0, self.piles[k].1) = (nx, nz);
+                }
+            }
+        }
         // A click on an ant follows it; anywhere else, drops food.
         for &(x, y) in clicks {
             if !self.pick(x, y) {
@@ -2397,7 +2531,7 @@ impl Colony {
         // Leaves grow back, but for the end of autumn, when they fall, and
         // winter, when there are none.
         let bare = winter || (self.clock / DAY) % YEAR > 14.0;
-        for l in self.plants.iter_mut().flat_map(|p| &mut p.leaves) {
+        for l in self.plants.iter_mut().filter(|p| p.alive()).flat_map(|p| &mut p.leaves) {
             l.2 = if bare { (l.2 - dt / 40.0).max(0.0) } else { (l.2 + dt / 90.0).min(1.0) };
         }
         // Rain: it comes now and then, but not in winter. While it falls
@@ -2407,7 +2541,7 @@ impl Colony {
             self.rain -= dt;
             self.plug = (self.plug + dt / 6.0).min(1.0);
             self.twigs.iter_mut().for_each(|t| t.left -= dt / 100.0);
-            self.plants.iter_mut().flat_map(|p| &mut p.leaves).filter(|_| !bare).for_each(|l| l.2 = (l.2 + dt / 45.0).min(1.0));
+            self.plants.iter_mut().filter(|p| p.alive()).flat_map(|p| &mut p.leaves).filter(|_| !bare).for_each(|l| l.2 = (l.2 + dt / 45.0).min(1.0));
             if self.rain <= 0.0 {
                 self.cloud = 480.0 + 480.0 * self.r();
             }
@@ -2425,6 +2559,9 @@ impl Colony {
         // driven off, or has had enough.
         if self.milks() {
             for k in 0..self.plants.len() {
+                if !self.plants[k].alive() {
+                    continue;
+                }
                 let come = self.plants[k].bug <= 0.0 && self.plants[k].aphids >= 3.0 && self.r() < dt / 150.0;
                 let p = &mut self.plants[k];
                 p.bug = if come { 40.0 } else { (p.bug - dt).max(0.0) };
@@ -2436,13 +2573,11 @@ impl Colony {
         for p in self.piles.iter_mut().filter(|p| self.tasks.contains(&p.3)) {
             p.2 = p.2.max(6.0);
         }
-        if self.refuse >= 12 && self.plants.len() < 5 && self.season() < 2 && self.r() < dt / 60.0 {
+        if self.refuse >= 12 && self.plants.iter().filter(|p| !p.gone()).count() < 5 && self.season() < 2 && self.r() < dt / 60.0 {
             self.refuse -= 10;
             let (ang, out) = (TAU * self.r(), (20.0 + 15.0 * self.r()) * self.scale());
-            let (x, z) = ((self.nest.0 + out * ang.cos()).min(self.w - 6.0).max(6.0), (self.nest.1 + out * ang.sin()).min(self.h - 6.0).max(6.0));
-            let h = self.gy * (0.5 + 0.3 * self.r());
-            let leaves = (0..4).map(|k| (h * (0.35 + 0.65 * (k + 1) as f64 / 4.0), if k % 2 == 0 { 1.0 } else { -1.0 }, 0.05)).collect();
-            self.plants.push(Plant { x, z, h, lean: 0.0, leaves, aphids: 0.0, bug: 0.0 });
+            let at = ((self.nest.0 + out * ang.cos()).min(self.w - 6.0).max(6.0), (self.nest.1 + out * ang.sin()).min(self.h - 6.0).max(6.0));
+            self.grow(at, 0.05);
             self.note(11, 0.0);
         }
         // How many there are, four times a day; the seasons turning; the
@@ -2454,6 +2589,8 @@ impl Colony {
                 self.pops.remove(0);
             }
         }
+        let winter_came = self.season() == 3 && self.season_was != 3;
+        self.garden(dt, bare, winter_came);
         if self.season() != self.season_was {
             self.season_was = self.season();
             match self.season_was {
@@ -2533,6 +2670,7 @@ impl Colony {
         // grows, and hatches where it lies.
         // In winter they're still, and eat little, and she doesn't lay.
         self.stock = (self.stock - self.ants.len() as f64 * if winter { 0.001 } else { 0.003 } * dt).max(0.0);
+        self.stock = self.stock.min(self.cap as f64 * 2.0 + 20.0);
         if !winter {
             self.lay -= dt;
         }
@@ -2630,6 +2768,10 @@ impl Colony {
         let total: f64 = self.mound.iter().sum();
         if total > self.w * 0.9 {
             self.mound.iter_mut().for_each(|m| *m *= 1.0 - 0.01 * dt);
+            // Drawn again now and then, as it does.
+            if (self.clock / 5.0).floor() != ((self.clock - dt) / 5.0).floor() {
+                self.made = None;
+            }
         }
         let door = (self.nest.0 as usize).min(self.pw - 1);
         for k in door.saturating_sub(1)..=(door + 1).min(self.pw - 1) {
@@ -2678,7 +2820,7 @@ impl Colony {
                     if let Some(st) = self.stones.iter().find(|s| ((at.0 - s.0) / s.2).powi(2) + ((at.1 - s.1) / s.3).powi(2) < 1.0) {
                         return th.bg.mix(if at.1 < st.1 - st.3 * 0.3 { STONE.mix(BROOD, 0.25) } else { STONE }, 0.7);
                     }
-                    if self.plants.iter().any(|p| deep < p.h * 0.7 && (at.0 - p.x - 2.5 * (deep * 0.35 + p.x).sin()).abs() < 0.8) {
+                    if self.plants.iter().any(|p| !p.gone() && deep < p.h * 0.7 && (at.0 - p.x - 2.5 * (deep * 0.35 + p.x).sin()).abs() < 0.8) {
                         return th.bg.mix(b.mix(Rgb(0, 0, 0), 0.35), much);
                     }
                     // Streaks of the darker tone, each a cell deep and a
@@ -2770,14 +2912,21 @@ impl Colony {
     /// what was dug out, and those that are out.
     fn above(&self, px: &mut [Rgb], t: f64, body: Rgb, theirs: Rgb, th: &Theme) {
         let pw = self.pw;
-        for p in &self.plants {
+        for p in self.plants.iter().filter(|p| !p.gone()) {
             for (k, &(_, _, left)) in p.leaves.iter().enumerate() {
                 let ang = k as f64 * 2.4;
                 if left > 0.05 {
                     self.leaf(px, (p.x + 4.0 * ang.cos(), p.z + 4.0 * ang.sin()), 4.0 * left.sqrt(), 3.0 * left.sqrt());
                 }
             }
-            put(px, pw, p.x, p.z, STEM, 1.0);
+            // Dead, what's left of it is brown.
+            put(px, pw, p.x, p.z, if p.alive() { STEM } else { TWIG }, 1.0);
+            if !p.alive() {
+                for k in 0..4 {
+                    let ang = k as f64 * 1.6 + p.x;
+                    put(px, pw, p.x + 2.0 * ang.cos(), p.z + 2.0 * ang.sin(), TWIG, 0.7);
+                }
+            }
             for k in 0..p.aphids.ceil() as usize {
                 let ang = k as f64 * 1.9 + 0.7;
                 put(px, pw, p.x + 3.5 * ang.cos(), p.z + 3.5 * ang.sin(), APHID, 1.0);
@@ -2909,11 +3058,13 @@ impl Colony {
                 put(px, pw, x, self.ground(x) - 1.0, STEM, 0.7);
             }
         }
-        for (p, pl) in self.plants.iter().enumerate() {
+        for (p, pl) in self.plants.iter().enumerate().filter(|(_, pl)| !pl.gone()) {
+            // Dead, it's a brown stalk, bent over, shorter as it rots.
+            let (tone, tall) = if pl.alive() { (STEM, pl.h) } else { (TWIG, pl.h * (0.35 + 0.5 * pl.wither / 90.0)) };
             let mut up = 0.0;
-            while up <= pl.h {
+            while up <= tall {
                 let s = self.stem(p, up);
-                put(px, pw, s.0, s.1, STEM, 1.0);
+                put(px, pw, s.0, s.1, tone, 1.0);
                 up += 0.5;
             }
             for &(up, side, left) in &pl.leaves {
@@ -3522,5 +3673,139 @@ mod tests {
         assert!((c.nodes[1].end().0 - c.nest.0).abs() < 1.0 && c.history().join(" ").contains("moved on"));
         watch(&mut c, 100.0, 30, |_| {});
         all_in_holes(&c);
+    }
+
+    #[test]
+    fn a_resize_keeps_the_trails() {
+        let mut c = colony("black", 0);
+        // A trail a pixel wide, across, and one down.
+        for x in 20..120 {
+            (c.scent[30 * c.pw + x], c.shown[30 * c.pw + x]) = (3.0, 3);
+        }
+        for y in 5..50 {
+            (c.scent[y * c.pw + 80], c.shown[y * c.pw + 80]) = (3.0, 3);
+        }
+        let lit = |c: &Colony| c.shown.iter().filter(|s| **s == 3).count();
+        // Bigger, it's still there, as long in proportion; and smaller, a
+        // thin one isn't lost between the pixels.
+        for (pw, ph) in [(240, 90), (100, 36), (61, 23), (160, 60)] {
+            c.resize(pw, ph);
+            let (across, down) = ((0..pw).filter(|&x| (0..ph).any(|y| c.shown[y * pw + x] == 3)).count(), (0..ph).filter(|&y| (0..pw).any(|x| c.shown[y * pw + x] == 3)).count());
+            assert!(across * 160 >= pw * 95 && down * 60 >= ph * 40, "{pw}x{ph}: {across} {down} {}", lit(&c));
+            assert!(c.scent.iter().zip(&c.shown).all(|(v, s)| (*v > 0.0) == (*s > 0)) && c.scent.len() == pw * ph);
+            // And it's what's drawn, from above.
+            c.view(true);
+            let th = Theme::default();
+            let mut field = vec![Rgb::default(); pw * ph];
+            c.back(&mut field, &th);
+            assert!(field.iter().any(|p| *p != field[0]));
+            c.view(false);
+        }
+    }
+
+    #[test]
+    fn plants_die_and_others_come_up() {
+        let mut c = colony("", 0);
+        (c.cloud, c.prowl, c.muster, c.fall) = (f64::MAX, f64::MAX, f64::MAX, f64::MAX);
+        c.ants.clear();
+        c.brood.clear();
+        c.queen = true;
+        c.stock = 0.5;
+        // One kept cut short, past its first days: it sickens and dies,
+        // stands dead a while, and is gone; nothing goes to it for leaf.
+        c.plants.iter_mut().for_each(|p| p.age = 500.0);
+        let mut states = [false; 2];
+        for k in 0..300 * 30 {
+            c.plants[0].leaves.iter_mut().for_each(|l| l.2 = l.2.min(0.2));
+            c.step(1.0 / 30.0, k as f64 / 30.0, &[], &[]);
+            states[0] |= !c.plants[0].alive() && !c.plants[0].gone();
+            states[1] |= c.plants[0].gone();
+            c.ants.clear();
+            c.brood.clear();
+        }
+        assert_eq!(states, [true; 2]);
+        assert!(c.plants[1].alive() && c.plants[2].alive() && c.history().join(" ").contains("a plant died"));
+        assert!(c.food(c.plants[0].x, c.plants[0].z, 3.0).is_none());
+        // The rest dead too: a seedling comes up, where one was, so those
+        // that knew the others by number still do.
+        c.plants.iter_mut().for_each(|p| (p.health, p.wither) = (0.0, 0.0));
+        c.clock = DAY * 1.4;
+        watch(&mut c, 300.0, 240, |c| {
+            c.plants.iter().for_each(|p| assert!(p.alive() || p.gone() || p.wither > 0.0));
+        });
+        assert!(c.plants.iter().filter(|p| p.alive()).count() >= 2 && c.plants.len() == 3, "{}", c.plants.len());
+        assert!(c.history().join(" ").contains("a seedling came up"));
+        // Each winter takes some: over a few, not none, and not all.
+        let mut c = colony("", 0);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        let mut died = 0;
+        for year in 0..6 {
+            c.plants.iter_mut().for_each(|p| (p.health, p.age) = (1.0, 0.0));
+            c.clock = DAY * (YEAR * year as f64 + 14.999);
+            c.season_was = 2;
+            watch(&mut c, 0.0, 3, |_| {});
+            died += c.plants.iter().filter(|p| !p.alive()).count();
+        }
+        assert!((1..15).contains(&died), "{died}");
+    }
+
+    #[test]
+    fn what_a_reader_found_wrong_stays_right() {
+        // Army ants moved: what's written out still comes back.
+        for seed in 0..16 {
+            let mut c = Colony::new(160, 60, seed, "grown army", Some(30));
+            (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+            c.clock = DAY * 17.6 / 24.0;
+            watch(&mut c, 0.0, 90, |_| {});
+            assert!(c.history().join(" ").contains("moved on") && c.nodes.iter().all(|n| n.done()), "seed {seed}");
+            let mut d = Colony::new(160, 60, 99, "grown army", Some(30));
+            assert!(d.restore(&c.snapshot()), "seed {seed}");
+        }
+        // The dead whose bearer was taken on the way are fetched by another.
+        let mut c = colony("", 20);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        c.count += 1;
+        let q = c.room(Room::Queen).unwrap();
+        c.dead.push((Loc::Room(q, 0.0, 0.0), c.count, true));
+        watch(&mut c, 20.0, 120, |_| {});
+        assert!(c.dead.iter().all(|d| d.1 != c.count), "{}", c.dead.len());
+        // Food under text, seen from above, is got to all the same.
+        let mut c = colony("black", 0);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        c.view(true);
+        let mut text = vec![false; 80 * 30];
+        for r in 4..12 {
+            text[r * 80 + 10..r * 80 + 40].fill(true);
+        }
+        c.piles.clear();
+        c.plants.iter_mut().for_each(|p| p.aphids = 0.0);
+        c.count += 1;
+        c.piles.push((50.0, 32.0, 6.0, c.count));
+        let id = c.count;
+        for k in 0..240 * 30 {
+            c.plants.iter_mut().for_each(|p| p.aphids = 0.0);
+            c.step(1.0 / 30.0, k as f64 / 30.0, &text, &[]);
+        }
+        assert!(c.piles.iter().all(|p| p.3 != id || p.2 < 6.0), "{:?}", c.piles);
+        // A screen a cell wide, with a spider and a rival's dead: no panic.
+        let mut c = Colony::new(2, 12, 1, "grown fire", None);
+        c.hunter = Some(Spider { x: 0.5, z: 3.0, dir: 0.0, hp: 0.0, fed: 0, bite: 0.0, stay: 9.0 });
+        c.rivals.push(Rival { x: 0.5, z: 3.0, dir: 0.0, has: false, grip: 0.0 });
+        watch(&mut c, 0.0, 20, |_| {});
+        // A colony comes through the winter.
+        let mut c = colony("", 60);
+        (c.cloud, c.prowl, c.muster) = (f64::MAX, f64::MAX, f64::MAX);
+        let before = c.ants.len();
+        c.clock = DAY * 15.0;
+        c.stock = 40.0;
+        watch(&mut c, 60.0, 490, |_| {});
+        assert!(c.season() == 0 && c.ants.len() * 2 >= before, "{} of {before}", c.ants.len());
+        // A file that makes no sense, in ways that would have hung or
+        // panicked, is left alone.
+        let whole = c.snapshot();
+        let mut bad = whole.clone();
+        bad[8..16].copy_from_slice(&1e300f64.to_le_bytes());
+        assert!(!c.restore(&bad));
+        assert!(c.restore(&whole));
     }
 }

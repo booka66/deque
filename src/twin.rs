@@ -152,9 +152,13 @@ impl Twin {
 
     /// Food the other dropped, since last asked.
     pub fn fed(&self) -> Vec<(f64, f64, bool)> {
-        let feed = self.dir.join("feed");
-        let Ok(text) = std::fs::read_to_string(&feed) else { return vec![] };
-        let _ = std::fs::remove_file(&feed);
+        // Taken first, then read: what's dropped meanwhile starts another.
+        let mine = self.dir.join(format!("feed.{}", self.id));
+        if std::fs::rename(self.dir.join("feed"), &mine).is_err() {
+            return vec![];
+        }
+        let text = std::fs::read_to_string(&mine).unwrap_or_default();
+        let _ = std::fs::remove_file(&mine);
         text.lines()
             .filter_map(|l| {
                 let mut w = l.split(' ');
